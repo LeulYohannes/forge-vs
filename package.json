@@ -10,16 +10,57 @@
     "Other"
   ],
   "activationEvents": [
-    "*"
+    "*",
+    "onView:forge-vs.ticketView",
+    "onCommand:forge-vs.showTicketView",
+    "onCommand:forge-vs.submit"
   ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "forge-vs.helloWorld",
-        "title": "Hello World"
+        "command": "forge-vs.submit",
+        "title": "Forge AI: Submit for Evaluation"
+      },
+      {
+        "command": "forge-vs.showTicketView",
+        "title": "Forge AI: Show Ticket View"
       }
-    ]
+    ],
+    "keybindings": [
+      {
+        "command": "forge-vs.submit",
+        "key": "ctrl+shift+e",
+        "mac": "cmd+shift+e"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "forge-vs",
+          "title": "Forge AI",
+          "icon": "$(rocket)"
+        }
+      ]
+    },
+    "views": {
+      "forge-vs": [
+        {
+          "id": "forge-vs.ticketView",
+          "name": "Ticket"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Forge AI",
+      "properties": {
+        "forgeAI.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "URL of the Forge AI backend API"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",

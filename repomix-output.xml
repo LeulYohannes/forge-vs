@@ -1,0 +1,997 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+src/
+  data/
+    taskData.ts
+  providers/
+    TicketViewProvider.ts
+  test/
+    extension.test.ts
+  extension.ts
+.gitignore
+.vscode-test.mjs
+.vscodeignore
+CHANGELOG.md
+esbuild.js
+eslint.config.mjs
+package.json
+README.md
+tsconfig.json
+vsc-extension-quickstart.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/data/taskData.ts">
+export interface Task {
+    id: string;
+    title: string;
+    priority: "P0" | "P1" | "P2" | "P3";
+    reporter: string;
+    skill: string;
+    company: string;
+    ticketType: "bug" | "feature" | "improvement";
+    context: string;
+    description: string;
+    acceptanceCriteria: string[];
+}
+
+export const TASK_1: Task = {
+    id: "RAG-114",
+    title: "Chunking returns empty results on long documents",
+    priority: "P1",
+    reporter: "Sarah Chen",
+    skill: "chunking",
+    company: "Meridian AI",
+    ticketType: "bug",
+    context: `**Meridian AI — Ingestion Pipeline**
+
+Sarah Chen reported: "We're seeing empty results from the chunker on documents longer than 10,000 characters. This is causing downstream retrieval to fail silently."
+
+The chunker is the first step in our ingestion pipeline. If it returns empty, nothing gets indexed. This is affecting ~15% of our legal document processing.
+
+**Files involved:**
+- \`meridian/ingestion/splitter.py\` — the chunker itself
+- \`meridian/ingestion/tests/test_splitter.py\` — unit tests
+
+**Your task:** Fix the chunker so it properly splits documents by syntax, not just character count.`,
+    description: `## Your Mission
+
+Write a function \`syntax_aware_splitter(source_code: str) -> List[str]\` that splits Python source code into logical chunks (top-level functions, classes, etc.).
+
+### Why This Matters
+
+Our users upload Python scripts and Jupyter notebooks. We need to index them intelligently — splitting by function/class boundaries so retrieval is precise, not random.
+
+### Requirements
+
+1. **Split by syntax:** Top-level functions and classes become separate chunks
+2. **Preserve indentation:** Keep the structure intact within each chunk
+3. **Handle invalid syntax:** Return empty list for invalid Python
+4. **Clean chunks:** No empty chunks, no trailing whitespace
+
+### Example
+
+\`\`\`python
+source_code = """
+def greet(name):
+    return f"Hello, {name}"
+
+def farewell(name):
+    return f"Goodbye, {name}"
+"""
+
+# Should return:
+# ["def greet(name):\\n    return f\\"Hello, {name}\\"", 
+#  "def farewell(name):\\n    return f\\"Goodbye, {name}\\"",]
+\`\`\``,
+    acceptanceCriteria: [
+        "Splits code by top-level function definitions",
+        "Returns empty list for invalid Python syntax",
+        "Preserves indentation and structure",
+        "Handles empty input gracefully",
+        "Handles code with no functions/classes (returns [])"
+    ]
+};
+</file>
+
+<file path="src/providers/TicketViewProvider.ts">
+import * as vscode from 'vscode';
+import { Task, TASK_1 } from '../data/taskData';
+
+export class TicketViewProvider implements vscode.WebviewViewProvider {
+    public static readonly viewType = 'forge-vs.ticketView';
+
+    private _view?: vscode.WebviewView;
+
+    constructor(private readonly _extensionContext: vscode.ExtensionContext) {
+        console.log('📦 TicketViewProvider constructor called');
+    }
+
+    public resolveWebviewView(
+        webviewView: vscode.WebviewView,
+        context: vscode.WebviewViewResolveContext,
+        _token: vscode.CancellationToken,
+    ) {
+        console.log('📖 resolveWebviewView called! THIS IS CRITICAL — IF YOU SEE THIS, THE VIEW IS WORKING!');
+        
+        this._view = webviewView;
+
+        webviewView.webview.options = {
+            enableScripts: true,
+        };
+
+        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, TASK_1);
+        console.log('✅ Webview HTML set!');
+    }
+
+    private _getHtmlForWebview(webview: vscode.Webview, task: Task): string {
+        const criteriaHtml = task.acceptanceCriteria
+            .map(criterion => `<li>${criterion}</li>`)
+            .join('');
+
+        return `<!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {
+                    padding: 12px 16px;
+                    font-family: var(--vscode-font-family);
+                    color: var(--vscode-foreground);
+                    background-color: var(--vscode-editor-background);
+                    line-height: 1.6;
+                }
+                .ticket-id {
+                    color: var(--vscode-textLink-foreground);
+                    font-size: 11px;
+                    font-family: var(--vscode-editor-font-family);
+                    letter-spacing: 0.5px;
+                    text-transform: uppercase;
+                }
+                .ticket-title {
+                    font-size: 18px;
+                    font-weight: 600;
+                    margin: 6px 0 4px 0;
+                    color: var(--vscode-foreground);
+                }
+                .ticket-meta {
+                    display: flex;
+                    gap: 8px;
+                    flex-wrap: wrap;
+                    margin: 8px 0 16px 0;
+                    font-size: 12px;
+                }
+                .ticket-meta .tag {
+                    display: inline-block;
+                    padding: 2px 8px;
+                    border-radius: 4px;
+                    background-color: var(--vscode-badge-background);
+                    color: var(--vscode-badge-foreground);
+                    font-family: var(--vscode-editor-font-family);
+                }
+                .ticket-meta .priority {
+                    background-color: #F97316;
+                    color: #0A0A0A;
+                    font-weight: 600;
+                }
+                .section {
+                    margin-top: 16px;
+                }
+                .section h3 {
+                    font-size: 13px;
+                    font-weight: 600;
+                    margin-bottom: 6px;
+                    color: var(--vscode-foreground);
+                }
+                .section .content {
+                    font-size: 13px;
+                    color: var(--vscode-descriptionForeground);
+                    white-space: pre-wrap;
+                }
+                .section ul {
+                    padding-left: 16px;
+                    margin: 4px 0;
+                }
+                .section ul li {
+                    font-size: 13px;
+                    color: var(--vscode-descriptionForeground);
+                    margin-bottom: 2px;
+                }
+                .divider {
+                    border: none;
+                    border-top: 1px solid var(--vscode-panel-border);
+                    margin: 14px 0;
+                }
+                .context-block {
+                    background-color: var(--vscode-editor-inactiveSelectionBackground);
+                    padding: 10px 12px;
+                    border-radius: 4px;
+                    border-left: 3px solid var(--vscode-textLink-foreground);
+                    font-size: 13px;
+                    color: var(--vscode-descriptionForeground);
+                    white-space: pre-wrap;
+                }
+                code {
+                    font-family: var(--vscode-editor-font-family);
+                    font-size: 12px;
+                    background-color: var(--vscode-editor-inactiveSelectionBackground);
+                    padding: 1px 4px;
+                    border-radius: 3px;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="ticket-id">${task.id}</div>
+            <div class="ticket-title">${task.title}</div>
+            <div class="ticket-meta">
+                <span class="tag priority">${task.priority}</span>
+                <span class="tag">${task.skill}</span>
+                <span class="tag">${task.ticketType}</span>
+                <span class="tag">${task.company}</span>
+            </div>
+            <div class="ticket-meta" style="margin-top: -4px; font-size: 12px; color: var(--vscode-descriptionForeground);">
+                Reported by ${task.reporter}
+            </div>
+
+            <hr class="divider" />
+
+            <div class="section">
+                <h3>Context</h3>
+                <div class="context-block">${task.context}</div>
+            </div>
+
+            <div class="section">
+                <h3>Description</h3>
+                <div class="content">${task.description}</div>
+            </div>
+
+            <div class="section">
+                <h3>Acceptance Criteria</h3>
+                <ul>${criteriaHtml}</ul>
+            </div>
+        </body>
+        </html>`;
+    }
+
+    public updateView(task: Task) {
+        if (this._view) {
+            this._view.webview.html = this._getHtmlForWebview(this._view.webview, task);
+        }
+    }
+}
+</file>
+
+<file path="src/test/extension.test.ts">
+import * as assert from 'assert';
+
+// You can import and use all API from the 'vscode' module
+// as well as import your extension to test it
+import * as vscode from 'vscode';
+// import * as myExtension from '../../extension';
+
+suite('Extension Test Suite', () => {
+	vscode.window.showInformationMessage('Start all tests.');
+
+	test('Sample test', () => {
+		assert.strictEqual(-1, [1, 2, 3].indexOf(5));
+		assert.strictEqual(-1, [1, 2, 3].indexOf(0));
+	});
+});
+</file>
+
+<file path="src/extension.ts">
+import * as vscode from 'vscode';
+import { Task, TASK_1 } from './data/taskData';
+import { TicketViewProvider } from './providers/TicketViewProvider';
+
+interface EvaluationResult {
+    test_passed: boolean;
+    ai_score: number;
+    ai_feedback: string;
+    exec_error?: string | null;
+    error?: string | null;
+    logs?: string[];
+}
+
+export function activate(context: vscode.ExtensionContext) {
+    console.log('🚀 Forge AI extension is now active!');
+
+    // Register the sidebar view provider
+    const provider = new TicketViewProvider(context);
+    const registration = vscode.window.registerWebviewViewProvider(
+        'forge-vs.ticketView',
+        provider,
+        {
+            webviewOptions: {
+                retainContextWhenHidden: true
+            }
+        }
+    );
+    context.subscriptions.push(registration);
+    console.log('✅ Ticket view provider registered with options');
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.showTicketView', async () => {
+            console.log('📌 showTicketView command executed!');
+            showTicketPanel(TASK_1);
+        })
+    );
+
+    // Automatically open the ticket panel when the extension activates.
+    showTicketPanel(TASK_1);
+
+    // COMMAND: Submit for Evaluation (keep this working)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.submit', async () => {
+            console.log('📤 submit command executed!');
+            
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+                vscode.window.showErrorMessage('No file open. Open a Python file first.');
+                return;
+            }
+
+            const code = editor.document.getText();
+            const fileName = editor.document.fileName.split('/').pop() || 'unknown.py';
+
+            await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: `Submitting ${fileName} to Forge AI...`,
+                    cancellable: false,
+                },
+                async () => {
+                    try {
+                        const config = vscode.workspace.getConfiguration('forgeAI');
+                        const apiUrl = config.get('apiUrl') as string || 'http://localhost:8000';
+                        console.log(`🌐 API URL: ${apiUrl}`);
+
+                        const response = await fetch(`${apiUrl}/evaluate`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                code: code,
+                                task_id: 'task_1',
+                                ticket_context: '',
+                            }),
+                        });
+
+                        if (!response.ok) {
+                            const errorText = await response.text();
+                            throw new Error(`API Error (${response.status}): ${errorText}`);
+                        }
+
+                        const result = await response.json() as EvaluationResult;
+
+                        const passedText = result.test_passed ? '✅ PASSED' : '❌ FAILED';
+                        vscode.window.showInformationMessage(
+                            `Forge AI: ${passedText} (Score: ${result.ai_score}/100)`
+                        );
+
+                        showResultsPanel(result);
+
+                    } catch (error: any) {
+                        vscode.window.showErrorMessage(`Failed to submit: ${error.message}`);
+                        console.error('❌ Submit error:', error);
+                    }
+                }
+            );
+        })
+    );
+
+    // Remove the focusTicket command — it doesn't work reliably
+    // Users can just click the rocket icon
+}
+
+function showResultsPanel(result: EvaluationResult) {
+    const panel = vscode.window.createWebviewPanel(
+        'forgeResults',
+        'Forge AI Results',
+        vscode.ViewColumn.Beside,
+        { enableScripts: true }
+    );
+
+    const passed = result.test_passed ? 'passed' : 'failed';
+    const feedback = (result.ai_feedback || 'No feedback').replace(/\n/g, '<br>');
+
+    panel.webview.html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    padding: 24px;
+                    background: #1e1e1e;
+                    color: #cccccc;
+                    line-height: 1.6;
+                }
+                .score {
+                    font-size: 64px;
+                    font-weight: 700;
+                    text-align: center;
+                    padding: 20px 0 10px 0;
+                }
+                .passed { color: #4caf50; }
+                .failed { color: #f44336; }
+                .status {
+                    text-align: center;
+                    font-size: 18px;
+                    padding-bottom: 20px;
+                    border-bottom: 1px solid #333;
+                }
+                .section {
+                    margin-top: 20px;
+                }
+                .section-title {
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: #888;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                    margin-bottom: 8px;
+                }
+                .feedback {
+                    background: #2d2d2d;
+                    padding: 16px;
+                    border-radius: 6px;
+                    white-space: pre-wrap;
+                    font-size: 14px;
+                }
+                .error {
+                    color: #f44336;
+                    background: #2d1e1e;
+                    padding: 12px;
+                    border-radius: 6px;
+                    margin-top: 12px;
+                    border: 1px solid #f44336;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="score ${passed}">${result.ai_score || 0}/100</div>
+            <div class="status">${result.test_passed ? '✅ PASSED' : '❌ FAILED'}</div>
+            
+            <div class="section">
+                <div class="section-title">Feedback</div>
+                <div class="feedback">${feedback}</div>
+            </div>
+
+            ${result.exec_error ? `
+                <div class="section">
+                    <div class="section-title">Execution Error</div>
+                    <div class="error">${result.exec_error}</div>
+                </div>
+            ` : ''}
+        </body>
+        </html>
+    `;
+}
+
+function showTicketPanel(task: Task) {
+    const panel = vscode.window.createWebviewPanel(
+        'forgeTicket',
+        'Forge AI Ticket',
+        vscode.ViewColumn.One,
+        { enableScripts: true }
+    );
+
+    const criteriaHtml = task.acceptanceCriteria.map(criterion => `<li>${criterion}</li>`).join('');
+
+    panel.webview.html = `<!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {
+                    font-family: var(--vscode-font-family);
+                    color: var(--vscode-foreground);
+                    background-color: var(--vscode-editor-background);
+                    padding: 16px;
+                    line-height: 1.6;
+                }
+                .ticket-id {
+                    color: var(--vscode-textLink-foreground);
+                    font-size: 11px;
+                    text-transform: uppercase;
+                    letter-spacing: 0.4px;
+                    margin-bottom: 8px;
+                }
+                .ticket-title {
+                    font-size: 20px;
+                    font-weight: 700;
+                    margin: 0 0 10px 0;
+                }
+                .ticket-meta {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 8px;
+                    margin-bottom: 14px;
+                    font-size: 12px;
+                }
+                .tag {
+                    padding: 3px 10px;
+                    border-radius: 999px;
+                    background: var(--vscode-badge-background);
+                    color: var(--vscode-badge-foreground);
+                    font-size: 11px;
+                }
+                .section {
+                    margin-top: 18px;
+                }
+                .section h3 {
+                    margin: 0 0 8px 0;
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+                .content, .context-block {
+                    font-size: 13px;
+                    color: var(--vscode-descriptionForeground);
+                    white-space: pre-wrap;
+                }
+                .context-block {
+                    background: var(--vscode-editor-inactiveSelectionBackground);
+                    padding: 12px;
+                    border-radius: 6px;
+                }
+                ul {
+                    padding-left: 18px;
+                    margin: 0;
+                }
+                li {
+                    margin-bottom: 6px;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="ticket-id">${task.id}</div>
+            <div class="ticket-title">${task.title}</div>
+            <div class="ticket-meta">
+                <span class="tag">${task.priority}</span>
+                <span class="tag">${task.skill}</span>
+                <span class="tag">${task.ticketType}</span>
+                <span class="tag">${task.company}</span>
+                <span class="tag">Reported by ${task.reporter}</span>
+            </div>
+            <div class="section">
+                <h3>Context</h3>
+                <div class="context-block">${task.context}</div>
+            </div>
+            <div class="section">
+                <h3>Description</h3>
+                <div class="content">${task.description}</div>
+            </div>
+            <div class="section">
+                <h3>Acceptance Criteria</h3>
+                <ul>${criteriaHtml}</ul>
+            </div>
+        </body>
+        </html>`;
+}
+
+export function deactivate() {
+    console.log('👋 Forge AI extension deactivated');
+}
+</file>
+
+<file path=".gitignore">
+out
+dist
+node_modules
+.vscode-test/
+*.vsix
+</file>
+
+<file path=".vscode-test.mjs">
+import { defineConfig } from '@vscode/test-cli';
+
+export default defineConfig({
+	files: 'out/test/**/*.test.js',
+});
+</file>
+
+<file path=".vscodeignore">
+.vscode/**
+.vscode-test/**
+out/**
+node_modules/**
+src/**
+.gitignore
+.yarnrc
+esbuild.js
+vsc-extension-quickstart.md
+**/tsconfig.json
+**/eslint.config.mjs
+**/*.map
+**/*.ts
+**/.vscode-test.*
+</file>
+
+<file path="CHANGELOG.md">
+# Change Log
+
+All notable changes to the "forge-vs" extension will be documented in this file.
+
+Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
+
+## [Unreleased]
+
+- Initial release
+</file>
+
+<file path="esbuild.js">
+const esbuild = require("esbuild");
+
+const production = process.argv.includes('--production');
+const watch = process.argv.includes('--watch');
+
+/**
+ * @type {import('esbuild').Plugin}
+ */
+const esbuildProblemMatcherPlugin = {
+	name: 'esbuild-problem-matcher',
+
+	setup(build) {
+		build.onStart(() => {
+			console.log('[watch] build started');
+		});
+		build.onEnd((result) => {
+			result.errors.forEach(({ text, location }) => {
+				console.error(`✘ [ERROR] ${text}`);
+				console.error(`    ${location.file}:${location.line}:${location.column}:`);
+			});
+			console.log('[watch] build finished');
+		});
+	},
+};
+
+async function main() {
+	const ctx = await esbuild.context({
+		entryPoints: [
+			'src/extension.ts'
+		],
+		bundle: true,
+		format: 'cjs',
+		minify: production,
+		sourcemap: !production,
+		sourcesContent: false,
+		platform: 'node',
+		outfile: 'dist/extension.js',
+		external: ['vscode'],
+		logLevel: 'silent',
+		plugins: [
+			/* add to the end of plugins array */
+			esbuildProblemMatcherPlugin,
+		],
+	});
+	if (watch) {
+		await ctx.watch();
+	} else {
+		await ctx.rebuild();
+		await ctx.dispose();
+	}
+}
+
+main().catch(e => {
+	console.error(e);
+	process.exit(1);
+});
+</file>
+
+<file path="eslint.config.mjs">
+import typescriptEslint from "typescript-eslint";
+
+export default [{
+    files: ["**/*.ts"],
+}, {
+    plugins: {
+        "@typescript-eslint": typescriptEslint.plugin,
+    },
+
+    languageOptions: {
+        parser: typescriptEslint.parser,
+        ecmaVersion: 2022,
+        sourceType: "module",
+    },
+
+    rules: {
+        "@typescript-eslint/naming-convention": ["warn", {
+            selector: "import",
+            format: ["camelCase", "PascalCase"],
+        }],
+
+        curly: "warn",
+        eqeqeq: "warn",
+        "no-throw-literal": "warn",
+        semi: "warn",
+    },
+}];
+</file>
+
+<file path="package.json">
+{
+  "name": "forge-vs",
+  "displayName": "forge-vs",
+  "description": "Forge AI skill verification",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.125.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "*",
+    "onView:forge-vs.ticketView",
+    "onCommand:forge-vs.showTicketView",
+    "onCommand:forge-vs.submit"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "forge-vs.submit",
+        "title": "Forge AI: Submit for Evaluation"
+      },
+      {
+        "command": "forge-vs.showTicketView",
+        "title": "Forge AI: Show Ticket View"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "forge-vs.submit",
+        "key": "ctrl+shift+e",
+        "mac": "cmd+shift+e"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "forge-vs",
+          "title": "Forge AI",
+          "icon": "$(rocket)"
+        }
+      ]
+    },
+    "views": {
+      "forge-vs": [
+        {
+          "id": "forge-vs.ticketView",
+          "name": "Ticket"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Forge AI",
+      "properties": {
+        "forgeAI.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "URL of the Forge AI backend API"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.125.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "24.x",
+    "typescript-eslint": "^8.61.1",
+    "eslint": "^10.5.0",
+    "esbuild": "^0.28.1",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^6.0.3",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0"
+  },
+  "overrides": {
+    "diff": "^8.0.4",
+    "serialize-javascript": "^7.0.6"
+  }
+}
+</file>
+
+<file path="README.md">
+# forge-vs README
+
+This is the README for your extension "forge-vs". After writing up a brief description, we recommend including the following sections.
+
+## Features
+
+Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+
+For example if there is an image subfolder under your extension project workspace:
+
+\!\[feature X\]\(images/feature-x.png\)
+
+> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+
+## Requirements
+
+If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+
+## Extension Settings
+
+Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+
+For example:
+
+This extension contributes the following settings:
+
+* `myExtension.enable`: Enable/disable this extension.
+* `myExtension.thing`: Set to `blah` to do something.
+
+## Known Issues
+
+Calling out known issues can help limit users opening duplicate issues against your extension.
+
+## Release Notes
+
+Users appreciate release notes as you update your extension.
+
+### 1.0.0
+
+Initial release of ...
+
+### 1.0.1
+
+Fixed issue #.
+
+### 1.1.0
+
+Added features X, Y, and Z.
+
+---
+
+## Following extension guidelines
+
+Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
+
+* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
+
+## Working with Markdown
+
+You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
+
+* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
+* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
+* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
+
+## For more information
+
+* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
+* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
+
+**Enjoy!**
+</file>
+
+<file path="tsconfig.json">
+{
+    "compilerOptions": {
+        "module": "Node16",
+        "target": "ES2022",
+        "lib": [
+            "ES2022"
+        ],
+        "types": [
+            "node",
+            "mocha"
+        ],
+        "sourceMap": true,
+        "rootDir": "src",
+        "strict": true, /* enable all strict type-checking options */
+        /* Additional Checks */
+        // "noImplicitReturns": true, /* Report error when not all code paths in function return a value. */
+        // "noFallthroughCasesInSwitch": true, /* Report errors for fallthrough cases in switch statement. */
+        // "noUnusedParameters": true,  /* Report errors on unused parameters. */
+    }
+}
+</file>
+
+<file path="vsc-extension-quickstart.md">
+# Welcome to your VS Code Extension
+
+## What's in the folder
+
+* This folder contains all of the files necessary for your extension.
+* `package.json` - this is the manifest file in which you declare your extension and command.
+  * The sample plugin registers a command and defines its title and command name. With this information VS Code can show the command in the command palette. It doesn’t yet need to load the plugin.
+* `src/extension.ts` - this is the main file where you will provide the implementation of your command.
+  * The file exports one function, `activate`, which is called the very first time your extension is activated (in this case by executing the command). Inside the `activate` function we call `registerCommand`.
+  * We pass the function containing the implementation of the command as the second parameter to `registerCommand`.
+
+## Setup
+
+* install the recommended extensions (amodio.tsl-problem-matcher, ms-vscode.extension-test-runner, and dbaeumer.vscode-eslint)
+
+
+## Get up and running straight away
+
+* Press `F5` to open a new window with your extension loaded.
+* Run your command from the command palette by pressing (`Ctrl+Shift+P` or `Cmd+Shift+P` on Mac) and typing `Hello World`.
+* Set breakpoints in your code inside `src/extension.ts` to debug your extension.
+* Find output from your extension in the debug console.
+
+## Make changes
+
+* You can relaunch the extension from the debug toolbar after changing code in `src/extension.ts`.
+* You can also reload (`Ctrl+R` or `Cmd+R` on Mac) the VS Code window with your extension to load your changes.
+
+
+## Explore the API
+
+* You can open the full set of our API when you open the file `node_modules/@types/vscode/index.d.ts`.
+
+## Run tests
+
+* Install the [Extension Test Runner](https://marketplace.visualstudio.com/items?itemName=ms-vscode.extension-test-runner)
+* Run the "watch" task via the **Tasks: Run Task** command. Make sure this is running, or tests might not be discovered.
+* Open the Testing view from the activity bar and click the Run Test" button, or use the hotkey `Ctrl/Cmd + ; A`
+* See the output of the test result in the Test Results view.
+* Make changes to `src/test/extension.test.ts` or create new test files inside the `test` folder.
+  * The provided test runner will only consider files matching the name pattern `**.test.ts`.
+  * You can create folders inside the `test` folder to structure your tests any way you want.
+
+## Go further
+
+* Reduce the extension size and improve the startup time by [bundling your extension](https://code.visualstudio.com/api/working-with-extensions/bundling-extension).
+* [Publish your extension](https://code.visualstudio.com/api/working-with-extensions/publishing-extension) on the VS Code extension marketplace.
+* Automate builds by setting up [Continuous Integration](https://code.visualstudio.com/api/working-with-extensions/continuous-integration).
+</file>
+
+</files>
