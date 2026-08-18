@@ -77,15 +77,16 @@ export interface Task {
     acceptanceCriteria: string[];
 }
 
-export const TASK_1: Task = {
-    id: "RAG-114",
-    title: "Chunking returns empty results on long documents",
-    priority: "P1",
-    reporter: "Sarah Chen",
-    skill: "chunking",
-    company: "Meridian AI",
-    ticketType: "bug",
-    context: `**Meridian AI — Ingestion Pipeline**
+export const TASKS: Record<string, Task> = {
+    task_1: {
+        id: "RAG-114",
+        title: "Chunking returns empty results on long documents",
+        priority: "P1",
+        reporter: "Sarah Chen",
+        skill: "chunking",
+        company: "Meridian AI",
+        ticketType: "bug",
+        context: `**Meridian AI — Ingestion Pipeline**
 
 Sarah Chen reported: "We're seeing empty results from the chunker on documents longer than 10,000 characters. This is causing downstream retrieval to fail silently."
 
@@ -96,7 +97,7 @@ The chunker is the first step in our ingestion pipeline. If it returns empty, no
 - \`meridian/ingestion/tests/test_splitter.py\` — unit tests
 
 **Your task:** Fix the chunker so it properly splits documents by syntax, not just character count.`,
-    description: `## Your Mission
+        description: `## Your Mission
 
 Write a function \`syntax_aware_splitter(source_code: str) -> List[str]\` that splits Python source code into logical chunks (top-level functions, classes, etc.).
 
@@ -123,29 +124,281 @@ def farewell(name):
 """
 
 # Should return:
-# ["def greet(name):\\n    return f\\"Hello, {name}\\"", 
-#  "def farewell(name):\\n    return f\\"Goodbye, {name}\\"",]
+# ["def greet(name):\\n    return f\"Hello, {name}\"", 
+#  "def farewell(name):\\n    return f\"Goodbye, {name}\"",]
 \`\`\``,
-    acceptanceCriteria: [
-        "Splits code by top-level function definitions",
-        "Returns empty list for invalid Python syntax",
-        "Preserves indentation and structure",
-        "Handles empty input gracefully",
-        "Handles code with no functions/classes (returns [])"
-    ]
+        acceptanceCriteria: [
+            "Splits code by top-level function definitions",
+            "Returns empty list for invalid Python syntax",
+            "Preserves indentation and structure",
+            "Handles empty input gracefully",
+            "Handles code with no functions/classes (returns [])"
+        ]
+    },
+    task_2: {
+        id: "RAG-115",
+        title: "Hybrid score fusion produces incorrect rankings",
+        priority: "P1",
+        reporter: "Marcus Webb",
+        skill: "fusion",
+        company: "Meridian AI",
+        ticketType: "bug",
+        context: `**Meridian AI — Retrieval Pipeline**
+
+Marcus Webb flagged: "The hybrid search is ranking documents incorrectly. The alpha parameter seems to have no effect on the final scores."
+
+We use a hybrid retrieval system that combines:
+- **Sparse scores** (BM25 keyword matching)
+- **Dense scores** (vector embeddings from our fine-tuned model)
+
+The \`alpha\` parameter controls the balance between them. Currently, it's not working.
+
+**Files involved:**
+- \`meridian/retrieval/fusion.py\` — the fusion logic
+- \`meridian/retrieval/tests/test_fusion.py\` — unit tests
+
+**Your task:** Fix the fusion formula so alpha correctly weights dense vs sparse scores.`,
+        description: `## Your Mission
+
+Implement \`hybrid_score_fusion(sparse_scores, dense_scores, alpha=0.5)\` that combines sparse (BM25) and dense (vector) scores.
+
+### The Formula
+
+\`final_score = alpha * dense_score + (1 - alpha) * sparse_score\`
+
+### Why This Matters
+
+Our legal search customers need accurate hybrid ranking. If alpha doesn't work, we can't tune the search results.
+
+### Requirements
+
+1. **Handle missing keys:** Some documents may only have sparse or dense scores
+2. **Return sorted list:** \`[(doc_id, score), ...]\` sorted by score descending
+3. **Alpha works:** \`alpha=0.0\` = only sparse, \`alpha=1.0\` = only dense
+4. **Tie handling:** Deterministic ordering for equal scores
+
+### Example
+
+\`\`\`python
+sparse = {"doc_A": 0.9, "doc_B": 0.3}
+dense = {"doc_A": 0.2, "doc_B": 0.8}
+alpha = 0.5
+
+# doc_A: 0.5*0.2 + 0.5*0.9 = 0.55
+# doc_B: 0.5*0.8 + 0.5*0.3 = 0.55
+# Returns: [("doc_A", 0.55), ("doc_B", 0.55)]  (tie, deterministic order)
+\`\`\``,
+        acceptanceCriteria: [
+            "Correctly implements the fusion formula",
+            "Handles missing documents gracefully",
+            "Returns results sorted by score descending",
+            "Alpha parameter changes rankings as expected",
+            "Tie-breaking is deterministic"
+        ]
+    },
+    task_3: {
+        id: "RAG-116",
+        title: "Metadata filter ignores date conditions",
+        priority: "P2",
+        reporter: "Sarah Chen",
+        skill: "filtering",
+        company: "Meridian AI",
+        ticketType: "bug",
+        context: `**Meridian AI — Search Pipeline**
+
+Sarah Chen reported: "The metadata filter is treating all conditions as string matches. Date ranges and numeric thresholds are being ignored."
+
+We need to support:
+- **Exact matches:** \`{"status": "active"}\`
+- **Numeric thresholds:** \`{"min_score": 0.8}\`
+- **Date ranges:** \`{"created_after": "2024-01-01"}\`
+
+**Files involved:**
+- \`meridian/search/filter.py\` — the filter logic
+- \`meridian/search/tests/test_filter.py\` — unit tests
+
+**Your task:** Fix the filter to handle all condition types.`,
+        description: `## Your Mission
+
+Implement \`apply_metadata_filter(documents, conditions)\` that filters documents by metadata conditions.
+
+### Supported Conditions
+
+1. **Exact string matches:** \`{"status": "active"}\`
+2. **Numeric thresholds:** \`{"min_score": 0.8}\`
+3. **Date comparisons:** \`{"created_after": "2024-01-01"}\`
+
+### Why This Matters
+
+Our legal users filter by case number, document type, date range, and relevance score. Without this, search is unusable.
+
+### Requirements
+
+1. **Exact match:** \`doc["status"] == "active"\`
+2. **Min score:** \`doc["score"] >= 0.8\`
+3. **Date after:** \`doc["created_at"] >= "2024-01-01"\`
+4. **Multiple conditions:** All must match (AND logic)
+5. **Empty conditions:** Return all documents
+
+### Example
+
+\`\`\`python
+documents = [
+    {"id": "1", "status": "active", "score": 0.95, "created_at": "2024-06-01"},
+    {"id": "2", "status": "active", "score": 0.42, "created_at": "2024-06-01"},
+    {"id": "3", "status": "deprecated", "score": 0.88, "created_at": "2024-06-01"},
+]
+
+conditions = {"min_score": 0.80, "status": "active"}
+
+# Returns: [{"id": "1", ...}]  (only doc 1 meets both conditions)
+\`\`\``,
+        acceptanceCriteria: [
+            "Filters by exact string matches",
+            "Handles numeric thresholds (min_score)",
+            "Supports date comparisons (created_after)",
+            "Returns unfiltered list if no conditions",
+            "All conditions must match (AND logic)"
+        ]
+    },
+    task_4: {
+        id: "RAG-117",
+        title: "Reranker returns raw scores instead of final documents",
+        priority: "P1",
+        reporter: "Marcus Webb",
+        skill: "reranking",
+        company: "Meridian AI",
+        ticketType: "bug",
+        context: `**Meridian AI — Reranking Pipeline**
+
+Marcus Webb flagged: "The reranking step is returning raw relevance scores instead of the top K documents. Users are seeing scores instead of actual content."
+
+We use a cross-encoder to rerank the top 10 retrieved documents down to the top 3. Currently, it's returning scores, not documents.
+
+**Files involved:**
+- \`meridian/retrieval/rerank.py\` — the reranking logic
+- \`meridian/retrieval/tests/test_rerank.py\` — unit tests
+
+**Your task:** Fix the reranker to return documents, not scores.`,
+        description: `## Your Mission
+
+Implement \`rerank_retrievals(query, raw_documents, top_k=3)\` that:
+
+1. Accepts documents with a pre-computed \`relevance_score\` field
+2. Sorts by score (highest first)
+3. Returns the top K documents
+
+### Document Shape
+
+\`{"id": str, "content": str, "relevance_score": float}\`
+
+### Why This Matters
+
+Our cross-encoder (a neural network that computes relevance between query and document) gives us scores. But users don't want scores — they want the actual documents.
+
+### Requirements
+
+1. **Sort by score:** Highest relevance_score first
+2. **Return top K:** Exactly \`top_k\` documents
+3. **Tie handling:** Deterministic ordering for equal scores
+4. **Empty input:** Return empty list
+
+### Example
+
+\`\`\`python
+documents = [
+    {"id": "doc_low", "relevance_score": 0.12},
+    {"id": "doc_high", "relevance_score": 0.91},
+    {"id": "doc_mid", "relevance_score": 0.55},
+]
+
+result = rerank_retrievals("query", documents, top_k=2)
+
+# Returns: [{"id": "doc_high", ...}, {"id": "doc_mid", ...}]
+\`\`\``,
+        acceptanceCriteria: [
+            "Sorts documents by relevance_score descending",
+            "Returns exactly top_k documents",
+            "Handles ties deterministically",
+            "Returns empty list if no documents"
+        ]
+    },
+    task_5: {
+        id: "RAG-118",
+        title: "Faithfulness evaluator always returns 0%",
+        priority: "P0",
+        reporter: "Sarah Chen",
+        skill: "evaluation",
+        company: "Meridian AI",
+        ticketType: "bug",
+        context: `**Meridian AI — Evaluation Pipeline**
+
+Sarah Chen reported: "The faithfulness evaluation always returns 0%, even for perfectly supported answers. This is causing false negatives in our evaluation pipeline."
+
+We need to check if generated answers are supported by the retrieved context. Currently, it's always failing.
+
+**Files involved:**
+- \`meridian/eval/faithfulness.py\` — the evaluator
+- \`meridian/eval/tests/test_faithfulness.py\` — unit tests
+
+**Your task:** Fix the faithfulness evaluator to correctly check if statements are supported by context.`,
+        description: `## Your Mission
+
+Implement \`compute_faithfulness_score(context_chunks, generated_answer)\` that:
+
+1. Splits the answer into sentences
+2. Checks if each sentence is supported by the context
+3. Returns a report with:
+   - \`statements_checked\`: total sentences
+   - \`supported_statements\`: sentences supported by context
+   - \`faithfulness_ratio\`: percentage of supported statements
+
+### Word Overlap Threshold
+
+A statement is supported if \`50% or more\` of its words appear in any context chunk.
+
+### Why This Matters
+
+We need to detect hallucinations in our RAG system. If we can't evaluate faithfulness, we can't trust our responses.
+
+### Example
+
+\`\`\`python
+context = ["The sky is blue.", "Water boils at 100 degrees Celsius."]
+answer = "The sky is blue and water boils at 100 degrees."
+
+# "The sky is blue and water boils at 100 degrees." → split into sentences
+# "The sky is blue and water boils at 100 degrees." is supported by context
+# Returns: {"statements_checked": 1, "supported_statements": 1, "faithfulness_ratio": 1.0}
+\`\`\``,
+        acceptanceCriteria: [
+            "Splits answer into sentences correctly",
+            "Uses word overlap threshold (50%)",
+            "Returns proper faithfulness_ratio",
+            "Handles empty inputs gracefully"
+        ]
+    }
 };
+
+export const TASK_1 = TASKS.task_1;
 </file>
 
 <file path="src/providers/TicketViewProvider.ts">
 import * as vscode from 'vscode';
-import { Task, TASK_1 } from '../data/taskData';
+import { Task, TASKS } from '../data/taskData';
 
 export class TicketViewProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'forge-vs.ticketView';
 
     private _view?: vscode.WebviewView;
+    private _currentTaskId: string = 'task_1';
+    private _onTaskSelected?: (taskId: string) => void;
 
-    constructor(private readonly _extensionContext: vscode.ExtensionContext) {
+    constructor(
+        private readonly _extensionContext: vscode.ExtensionContext,
+        onTaskSelected?: (taskId: string) => void
+    ) {
+        this._onTaskSelected = onTaskSelected;
         console.log('📦 TicketViewProvider constructor called');
     }
 
@@ -154,7 +407,7 @@ export class TicketViewProvider implements vscode.WebviewViewProvider {
         context: vscode.WebviewViewResolveContext,
         _token: vscode.CancellationToken,
     ) {
-        console.log('📖 resolveWebviewView called! THIS IS CRITICAL — IF YOU SEE THIS, THE VIEW IS WORKING!');
+        console.log('📖 resolveWebviewView called!');
         
         this._view = webviewView;
 
@@ -162,11 +415,35 @@ export class TicketViewProvider implements vscode.WebviewViewProvider {
             enableScripts: true,
         };
 
-        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, TASK_1);
-        console.log('✅ Webview HTML set!');
+        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, this._currentTaskId);
+        
+        // Handle messages from the webview (dropdown selection)
+        webviewView.webview.onDidReceiveMessage((message) => {
+            if (message.type === 'taskSelected') {
+                this._currentTaskId = message.taskId;
+                if (this._onTaskSelected) {
+                    this._onTaskSelected(message.taskId);
+                }
+                // Update the view with the new task
+                if (this._view) {
+                    this._view.webview.html = this._getHtmlForWebview(this._view.webview, message.taskId);
+                }
+            }
+        });
     }
 
-    private _getHtmlForWebview(webview: vscode.Webview, task: Task): string {
+    private _getHtmlForWebview(webview: vscode.Webview, taskId: string): string {
+        const task = TASKS[taskId];
+        if (!task) {
+            return `<html><body><p>Task not found</p></body></html>`;
+        }
+
+        // Build dropdown options
+        const taskOptions = Object.entries(TASKS).map(([id, t]) => {
+            const selected = id === taskId ? 'selected' : '';
+            return `<option value="${id}" ${selected}>${t.id} - ${t.title.substring(0, 40)}${t.title.length > 40 ? '...' : ''}</option>`;
+        }).join('');
+
         const criteriaHtml = task.acceptanceCriteria
             .map(criterion => `<li>${criterion}</li>`)
             .join('');
@@ -181,6 +458,23 @@ export class TicketViewProvider implements vscode.WebviewViewProvider {
                     color: var(--vscode-foreground);
                     background-color: var(--vscode-editor-background);
                     line-height: 1.6;
+                }
+                .dropdown-container {
+                    margin-bottom: 16px;
+                }
+                .dropdown-container select {
+                    width: 100%;
+                    padding: 6px 8px;
+                    background: var(--vscode-dropdown-background);
+                    color: var(--vscode-dropdown-foreground);
+                    border: 1px solid var(--vscode-dropdown-border);
+                    border-radius: 4px;
+                    font-size: 12px;
+                    font-family: var(--vscode-font-family);
+                    cursor: pointer;
+                }
+                .dropdown-container select:focus {
+                    outline: 1px solid var(--vscode-focusBorder);
                 }
                 .ticket-id {
                     color: var(--vscode-textLink-foreground);
@@ -262,6 +556,12 @@ export class TicketViewProvider implements vscode.WebviewViewProvider {
             </style>
         </head>
         <body>
+            <div class="dropdown-container">
+                <select id="taskSelect">
+                    ${taskOptions}
+                </select>
+            </div>
+
             <div class="ticket-id">${task.id}</div>
             <div class="ticket-title">${task.title}</div>
             <div class="ticket-meta">
@@ -290,13 +590,25 @@ export class TicketViewProvider implements vscode.WebviewViewProvider {
                 <h3>Acceptance Criteria</h3>
                 <ul>${criteriaHtml}</ul>
             </div>
+
+            <script>
+                const select = document.getElementById('taskSelect');
+                select.addEventListener('change', () => {
+                    const vscode = acquireVsCodeApi();
+                    vscode.postMessage({
+                        type: 'taskSelected',
+                        taskId: select.value
+                    });
+                });
+            </script>
         </body>
         </html>`;
     }
 
-    public updateView(task: Task) {
+    public updateView(taskId: string) {
+        this._currentTaskId = taskId;
         if (this._view) {
-            this._view.webview.html = this._getHtmlForWebview(this._view.webview, task);
+            this._view.webview.html = this._getHtmlForWebview(this._view.webview, taskId);
         }
     }
 }
@@ -320,9 +632,291 @@ suite('Extension Test Suite', () => {
 });
 </file>
 
+<file path=".gitignore">
+out
+dist
+node_modules
+.vscode-test/
+*.vsix
+</file>
+
+<file path=".vscode-test.mjs">
+import { defineConfig } from '@vscode/test-cli';
+
+export default defineConfig({
+	files: 'out/test/**/*.test.js',
+});
+</file>
+
+<file path=".vscodeignore">
+.vscode/**
+.vscode-test/**
+out/**
+node_modules/**
+src/**
+.gitignore
+.yarnrc
+esbuild.js
+vsc-extension-quickstart.md
+**/tsconfig.json
+**/eslint.config.mjs
+**/*.map
+**/*.ts
+**/.vscode-test.*
+</file>
+
+<file path="CHANGELOG.md">
+# Change Log
+
+All notable changes to the "forge-vs" extension will be documented in this file.
+
+Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
+
+## [Unreleased]
+
+- Initial release
+</file>
+
+<file path="esbuild.js">
+const esbuild = require("esbuild");
+
+const production = process.argv.includes('--production');
+const watch = process.argv.includes('--watch');
+
+/**
+ * @type {import('esbuild').Plugin}
+ */
+const esbuildProblemMatcherPlugin = {
+	name: 'esbuild-problem-matcher',
+
+	setup(build) {
+		build.onStart(() => {
+			console.log('[watch] build started');
+		});
+		build.onEnd((result) => {
+			result.errors.forEach(({ text, location }) => {
+				console.error(`✘ [ERROR] ${text}`);
+				console.error(`    ${location.file}:${location.line}:${location.column}:`);
+			});
+			console.log('[watch] build finished');
+		});
+	},
+};
+
+async function main() {
+	const ctx = await esbuild.context({
+		entryPoints: [
+			'src/extension.ts'
+		],
+		bundle: true,
+		format: 'cjs',
+		minify: production,
+		sourcemap: !production,
+		sourcesContent: false,
+		platform: 'node',
+		outfile: 'dist/extension.js',
+		external: ['vscode'],
+		logLevel: 'silent',
+		plugins: [
+			/* add to the end of plugins array */
+			esbuildProblemMatcherPlugin,
+		],
+	});
+	if (watch) {
+		await ctx.watch();
+	} else {
+		await ctx.rebuild();
+		await ctx.dispose();
+	}
+}
+
+main().catch(e => {
+	console.error(e);
+	process.exit(1);
+});
+</file>
+
+<file path="eslint.config.mjs">
+import typescriptEslint from "typescript-eslint";
+
+export default [{
+    files: ["**/*.ts"],
+}, {
+    plugins: {
+        "@typescript-eslint": typescriptEslint.plugin,
+    },
+
+    languageOptions: {
+        parser: typescriptEslint.parser,
+        ecmaVersion: 2022,
+        sourceType: "module",
+    },
+
+    rules: {
+        "@typescript-eslint/naming-convention": ["warn", {
+            selector: "import",
+            format: ["camelCase", "PascalCase"],
+        }],
+
+        curly: "warn",
+        eqeqeq: "warn",
+        "no-throw-literal": "warn",
+        semi: "warn",
+    },
+}];
+</file>
+
+<file path="README.md">
+# forge-vs README
+
+This is the README for your extension "forge-vs". After writing up a brief description, we recommend including the following sections.
+
+## Features
+
+Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+
+For example if there is an image subfolder under your extension project workspace:
+
+\!\[feature X\]\(images/feature-x.png\)
+
+> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+
+## Requirements
+
+If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+
+## Extension Settings
+
+Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+
+For example:
+
+This extension contributes the following settings:
+
+* `myExtension.enable`: Enable/disable this extension.
+* `myExtension.thing`: Set to `blah` to do something.
+
+## Known Issues
+
+Calling out known issues can help limit users opening duplicate issues against your extension.
+
+## Release Notes
+
+Users appreciate release notes as you update your extension.
+
+### 1.0.0
+
+Initial release of ...
+
+### 1.0.1
+
+Fixed issue #.
+
+### 1.1.0
+
+Added features X, Y, and Z.
+
+---
+
+## Following extension guidelines
+
+Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
+
+* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
+
+## Working with Markdown
+
+You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
+
+* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
+* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
+* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
+
+## For more information
+
+* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
+* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
+
+**Enjoy!**
+</file>
+
+<file path="tsconfig.json">
+{
+    "compilerOptions": {
+        "module": "Node16",
+        "target": "ES2022",
+        "lib": [
+            "ES2022"
+        ],
+        "types": [
+            "node",
+            "mocha"
+        ],
+        "sourceMap": true,
+        "rootDir": "src",
+        "strict": true, /* enable all strict type-checking options */
+        /* Additional Checks */
+        // "noImplicitReturns": true, /* Report error when not all code paths in function return a value. */
+        // "noFallthroughCasesInSwitch": true, /* Report errors for fallthrough cases in switch statement. */
+        // "noUnusedParameters": true,  /* Report errors on unused parameters. */
+    }
+}
+</file>
+
+<file path="vsc-extension-quickstart.md">
+# Welcome to your VS Code Extension
+
+## What's in the folder
+
+* This folder contains all of the files necessary for your extension.
+* `package.json` - this is the manifest file in which you declare your extension and command.
+  * The sample plugin registers a command and defines its title and command name. With this information VS Code can show the command in the command palette. It doesn’t yet need to load the plugin.
+* `src/extension.ts` - this is the main file where you will provide the implementation of your command.
+  * The file exports one function, `activate`, which is called the very first time your extension is activated (in this case by executing the command). Inside the `activate` function we call `registerCommand`.
+  * We pass the function containing the implementation of the command as the second parameter to `registerCommand`.
+
+## Setup
+
+* install the recommended extensions (amodio.tsl-problem-matcher, ms-vscode.extension-test-runner, and dbaeumer.vscode-eslint)
+
+
+## Get up and running straight away
+
+* Press `F5` to open a new window with your extension loaded.
+* Run your command from the command palette by pressing (`Ctrl+Shift+P` or `Cmd+Shift+P` on Mac) and typing `Hello World`.
+* Set breakpoints in your code inside `src/extension.ts` to debug your extension.
+* Find output from your extension in the debug console.
+
+## Make changes
+
+* You can relaunch the extension from the debug toolbar after changing code in `src/extension.ts`.
+* You can also reload (`Ctrl+R` or `Cmd+R` on Mac) the VS Code window with your extension to load your changes.
+
+
+## Explore the API
+
+* You can open the full set of our API when you open the file `node_modules/@types/vscode/index.d.ts`.
+
+## Run tests
+
+* Install the [Extension Test Runner](https://marketplace.visualstudio.com/items?itemName=ms-vscode.extension-test-runner)
+* Run the "watch" task via the **Tasks: Run Task** command. Make sure this is running, or tests might not be discovered.
+* Open the Testing view from the activity bar and click the Run Test" button, or use the hotkey `Ctrl/Cmd + ; A`
+* See the output of the test result in the Test Results view.
+* Make changes to `src/test/extension.test.ts` or create new test files inside the `test` folder.
+  * The provided test runner will only consider files matching the name pattern `**.test.ts`.
+  * You can create folders inside the `test` folder to structure your tests any way you want.
+
+## Go further
+
+* Reduce the extension size and improve the startup time by [bundling your extension](https://code.visualstudio.com/api/working-with-extensions/bundling-extension).
+* [Publish your extension](https://code.visualstudio.com/api/working-with-extensions/publishing-extension) on the VS Code extension marketplace.
+* Automate builds by setting up [Continuous Integration](https://code.visualstudio.com/api/working-with-extensions/continuous-integration).
+</file>
+
 <file path="src/extension.ts">
 import * as vscode from 'vscode';
-import { Task, TASK_1 } from './data/taskData';
+import { Task, TASKS, TASK_1 } from './data/taskData';
 import { TicketViewProvider } from './providers/TicketViewProvider';
 
 interface EvaluationResult {
@@ -334,14 +928,22 @@ interface EvaluationResult {
     logs?: string[];
 }
 
+let currentTaskId: string = 'task_1';
+let ticketProvider: TicketViewProvider | undefined;
+
 export function activate(context: vscode.ExtensionContext) {
     console.log('🚀 Forge AI extension is now active!');
 
-    // Register the sidebar view provider
-    const provider = new TicketViewProvider(context);
+    // Register the sidebar view provider with task selection callback
+    ticketProvider = new TicketViewProvider(context, (taskId: string) => {
+        currentTaskId = taskId;
+        console.log(`📌 Task changed to: ${taskId}`);
+        vscode.window.showInformationMessage(`📋 Switched to ${TASKS[taskId].id}: ${TASKS[taskId].title}`);
+    });
+
     const registration = vscode.window.registerWebviewViewProvider(
         'forge-vs.ticketView',
-        provider,
+        ticketProvider,
         {
             webviewOptions: {
                 retainContextWhenHidden: true
@@ -351,20 +953,13 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(registration);
     console.log('✅ Ticket view provider registered with options');
 
-    context.subscriptions.push(
-        vscode.commands.registerCommand('forge-vs.showTicketView', async () => {
-            console.log('📌 showTicketView command executed!');
-            showTicketPanel(TASK_1);
-        })
-    );
-
-    // Automatically open the ticket panel when the extension activates.
+    // Show initial ticket panel
     showTicketPanel(TASK_1);
 
-    // COMMAND: Submit for Evaluation (keep this working)
+    // COMMAND: Submit for Evaluation
     context.subscriptions.push(
         vscode.commands.registerCommand('forge-vs.submit', async () => {
-            console.log('📤 submit command executed!');
+            console.log(`📤 submit command executed for task: ${currentTaskId}`);
             
             const editor = vscode.window.activeTextEditor;
             if (!editor) {
@@ -378,13 +973,15 @@ export function activate(context: vscode.ExtensionContext) {
             await vscode.window.withProgress(
                 {
                     location: vscode.ProgressLocation.Notification,
-                    title: `Submitting ${fileName} to Forge AI...`,
+                    title: `Submitting ${fileName} for ${TASKS[currentTaskId]?.id || currentTaskId}...`,
                     cancellable: false,
                 },
                 async () => {
                     try {
                         const config = vscode.workspace.getConfiguration('forgeAI');
-                        const apiUrl = config.get('apiUrl') as string || 'http://localhost:8000';
+                        const apiUrl = process.env.FORGE_API_URL || 
+                                       config.get('apiUrl') as string || 
+                                       'https://forge-ai-core.onrender.com';
                         console.log(`🌐 API URL: ${apiUrl}`);
 
                         const response = await fetch(`${apiUrl}/evaluate`, {
@@ -392,7 +989,7 @@ export function activate(context: vscode.ExtensionContext) {
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
                                 code: code,
-                                task_id: 'task_1',
+                                task_id: currentTaskId,
                                 ticket_context: '',
                             }),
                         });
@@ -419,9 +1016,6 @@ export function activate(context: vscode.ExtensionContext) {
             );
         })
     );
-
-    // Remove the focusTicket command — it doesn't work reliably
-    // Users can just click the rocket icon
 }
 
 function showResultsPanel(result: EvaluationResult) {
@@ -614,140 +1208,6 @@ export function deactivate() {
 }
 </file>
 
-<file path=".gitignore">
-out
-dist
-node_modules
-.vscode-test/
-*.vsix
-</file>
-
-<file path=".vscode-test.mjs">
-import { defineConfig } from '@vscode/test-cli';
-
-export default defineConfig({
-	files: 'out/test/**/*.test.js',
-});
-</file>
-
-<file path=".vscodeignore">
-.vscode/**
-.vscode-test/**
-out/**
-node_modules/**
-src/**
-.gitignore
-.yarnrc
-esbuild.js
-vsc-extension-quickstart.md
-**/tsconfig.json
-**/eslint.config.mjs
-**/*.map
-**/*.ts
-**/.vscode-test.*
-</file>
-
-<file path="CHANGELOG.md">
-# Change Log
-
-All notable changes to the "forge-vs" extension will be documented in this file.
-
-Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
-
-## [Unreleased]
-
-- Initial release
-</file>
-
-<file path="esbuild.js">
-const esbuild = require("esbuild");
-
-const production = process.argv.includes('--production');
-const watch = process.argv.includes('--watch');
-
-/**
- * @type {import('esbuild').Plugin}
- */
-const esbuildProblemMatcherPlugin = {
-	name: 'esbuild-problem-matcher',
-
-	setup(build) {
-		build.onStart(() => {
-			console.log('[watch] build started');
-		});
-		build.onEnd((result) => {
-			result.errors.forEach(({ text, location }) => {
-				console.error(`✘ [ERROR] ${text}`);
-				console.error(`    ${location.file}:${location.line}:${location.column}:`);
-			});
-			console.log('[watch] build finished');
-		});
-	},
-};
-
-async function main() {
-	const ctx = await esbuild.context({
-		entryPoints: [
-			'src/extension.ts'
-		],
-		bundle: true,
-		format: 'cjs',
-		minify: production,
-		sourcemap: !production,
-		sourcesContent: false,
-		platform: 'node',
-		outfile: 'dist/extension.js',
-		external: ['vscode'],
-		logLevel: 'silent',
-		plugins: [
-			/* add to the end of plugins array */
-			esbuildProblemMatcherPlugin,
-		],
-	});
-	if (watch) {
-		await ctx.watch();
-	} else {
-		await ctx.rebuild();
-		await ctx.dispose();
-	}
-}
-
-main().catch(e => {
-	console.error(e);
-	process.exit(1);
-});
-</file>
-
-<file path="eslint.config.mjs">
-import typescriptEslint from "typescript-eslint";
-
-export default [{
-    files: ["**/*.ts"],
-}, {
-    plugins: {
-        "@typescript-eslint": typescriptEslint.plugin,
-    },
-
-    languageOptions: {
-        parser: typescriptEslint.parser,
-        ecmaVersion: 2022,
-        sourceType: "module",
-    },
-
-    rules: {
-        "@typescript-eslint/naming-convention": ["warn", {
-            selector: "import",
-            format: ["camelCase", "PascalCase"],
-        }],
-
-        curly: "warn",
-        eqeqeq: "warn",
-        "no-throw-literal": "warn",
-        semi: "warn",
-    },
-}];
-</file>
-
 <file path="package.json">
 {
   "name": "forge-vs",
@@ -807,7 +1267,7 @@ export default [{
       "properties": {
         "forgeAI.apiUrl": {
           "type": "string",
-          "default": "http://localhost:8000",
+          "default": "https://forge-ai-core.onrender.com",
           "description": "URL of the Forge AI backend API"
         }
       }
@@ -844,154 +1304,6 @@ export default [{
     "serialize-javascript": "^7.0.6"
   }
 }
-</file>
-
-<file path="README.md">
-# forge-vs README
-
-This is the README for your extension "forge-vs". After writing up a brief description, we recommend including the following sections.
-
-## Features
-
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
-
-For example if there is an image subfolder under your extension project workspace:
-
-\!\[feature X\]\(images/feature-x.png\)
-
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
-
-## Requirements
-
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
-
-## Extension Settings
-
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
-
-For example:
-
-This extension contributes the following settings:
-
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
-
-## Known Issues
-
-Calling out known issues can help limit users opening duplicate issues against your extension.
-
-## Release Notes
-
-Users appreciate release notes as you update your extension.
-
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
-
----
-
-## Following extension guidelines
-
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
-
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
-
-## Working with Markdown
-
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
-
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
-
-## For more information
-
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
-</file>
-
-<file path="tsconfig.json">
-{
-    "compilerOptions": {
-        "module": "Node16",
-        "target": "ES2022",
-        "lib": [
-            "ES2022"
-        ],
-        "types": [
-            "node",
-            "mocha"
-        ],
-        "sourceMap": true,
-        "rootDir": "src",
-        "strict": true, /* enable all strict type-checking options */
-        /* Additional Checks */
-        // "noImplicitReturns": true, /* Report error when not all code paths in function return a value. */
-        // "noFallthroughCasesInSwitch": true, /* Report errors for fallthrough cases in switch statement. */
-        // "noUnusedParameters": true,  /* Report errors on unused parameters. */
-    }
-}
-</file>
-
-<file path="vsc-extension-quickstart.md">
-# Welcome to your VS Code Extension
-
-## What's in the folder
-
-* This folder contains all of the files necessary for your extension.
-* `package.json` - this is the manifest file in which you declare your extension and command.
-  * The sample plugin registers a command and defines its title and command name. With this information VS Code can show the command in the command palette. It doesn’t yet need to load the plugin.
-* `src/extension.ts` - this is the main file where you will provide the implementation of your command.
-  * The file exports one function, `activate`, which is called the very first time your extension is activated (in this case by executing the command). Inside the `activate` function we call `registerCommand`.
-  * We pass the function containing the implementation of the command as the second parameter to `registerCommand`.
-
-## Setup
-
-* install the recommended extensions (amodio.tsl-problem-matcher, ms-vscode.extension-test-runner, and dbaeumer.vscode-eslint)
-
-
-## Get up and running straight away
-
-* Press `F5` to open a new window with your extension loaded.
-* Run your command from the command palette by pressing (`Ctrl+Shift+P` or `Cmd+Shift+P` on Mac) and typing `Hello World`.
-* Set breakpoints in your code inside `src/extension.ts` to debug your extension.
-* Find output from your extension in the debug console.
-
-## Make changes
-
-* You can relaunch the extension from the debug toolbar after changing code in `src/extension.ts`.
-* You can also reload (`Ctrl+R` or `Cmd+R` on Mac) the VS Code window with your extension to load your changes.
-
-
-## Explore the API
-
-* You can open the full set of our API when you open the file `node_modules/@types/vscode/index.d.ts`.
-
-## Run tests
-
-* Install the [Extension Test Runner](https://marketplace.visualstudio.com/items?itemName=ms-vscode.extension-test-runner)
-* Run the "watch" task via the **Tasks: Run Task** command. Make sure this is running, or tests might not be discovered.
-* Open the Testing view from the activity bar and click the Run Test" button, or use the hotkey `Ctrl/Cmd + ; A`
-* See the output of the test result in the Test Results view.
-* Make changes to `src/test/extension.test.ts` or create new test files inside the `test` folder.
-  * The provided test runner will only consider files matching the name pattern `**.test.ts`.
-  * You can create folders inside the `test` folder to structure your tests any way you want.
-
-## Go further
-
-* Reduce the extension size and improve the startup time by [bundling your extension](https://code.visualstudio.com/api/working-with-extensions/bundling-extension).
-* [Publish your extension](https://code.visualstudio.com/api/working-with-extensions/publishing-extension) on the VS Code extension marketplace.
-* Automate builds by setting up [Continuous Integration](https://code.visualstudio.com/api/working-with-extensions/continuous-integration).
 </file>
 
 </files>

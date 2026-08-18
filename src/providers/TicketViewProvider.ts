@@ -1,12 +1,18 @@
 import * as vscode from 'vscode';
-import { Task, TASK_1 } from '../data/taskData';
+import { Task, TASKS } from '../data/taskData';
 
 export class TicketViewProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'forge-vs.ticketView';
 
     private _view?: vscode.WebviewView;
+    private _currentTaskId: string = 'task_1';
+    private _onTaskSelected?: (taskId: string) => void;
 
-    constructor(private readonly _extensionContext: vscode.ExtensionContext) {
+    constructor(
+        private readonly _extensionContext: vscode.ExtensionContext,
+        onTaskSelected?: (taskId: string) => void
+    ) {
+        this._onTaskSelected = onTaskSelected;
         console.log('📦 TicketViewProvider constructor called');
     }
 
@@ -15,7 +21,7 @@ export class TicketViewProvider implements vscode.WebviewViewProvider {
         context: vscode.WebviewViewResolveContext,
         _token: vscode.CancellationToken,
     ) {
-        console.log('📖 resolveWebviewView called! THIS IS CRITICAL — IF YOU SEE THIS, THE VIEW IS WORKING!');
+        console.log('📖 resolveWebviewView called!');
         
         this._view = webviewView;
 
@@ -23,11 +29,35 @@ export class TicketViewProvider implements vscode.WebviewViewProvider {
             enableScripts: true,
         };
 
-        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, TASK_1);
-        console.log('✅ Webview HTML set!');
+        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, this._currentTaskId);
+        
+        // Handle messages from the webview (dropdown selection)
+        webviewView.webview.onDidReceiveMessage((message) => {
+            if (message.type === 'taskSelected') {
+                this._currentTaskId = message.taskId;
+                if (this._onTaskSelected) {
+                    this._onTaskSelected(message.taskId);
+                }
+                // Update the view with the new task
+                if (this._view) {
+                    this._view.webview.html = this._getHtmlForWebview(this._view.webview, message.taskId);
+                }
+            }
+        });
     }
 
-    private _getHtmlForWebview(webview: vscode.Webview, task: Task): string {
+    private _getHtmlForWebview(webview: vscode.Webview, taskId: string): string {
+        const task = TASKS[taskId];
+        if (!task) {
+            return `<html><body><p>Task not found</p></body></html>`;
+        }
+
+        // Build dropdown options
+        const taskOptions = Object.entries(TASKS).map(([id, t]) => {
+            const selected = id === taskId ? 'selected' : '';
+            return `<option value="${id}" ${selected}>${t.id} - ${t.title.substring(0, 40)}${t.title.length > 40 ? '...' : ''}</option>`;
+        }).join('');
+
         const criteriaHtml = task.acceptanceCriteria
             .map(criterion => `<li>${criterion}</li>`)
             .join('');
@@ -42,6 +72,23 @@ export class TicketViewProvider implements vscode.WebviewViewProvider {
                     color: var(--vscode-foreground);
                     background-color: var(--vscode-editor-background);
                     line-height: 1.6;
+                }
+                .dropdown-container {
+                    margin-bottom: 16px;
+                }
+                .dropdown-container select {
+                    width: 100%;
+                    padding: 6px 8px;
+                    background: var(--vscode-dropdown-background);
+                    color: var(--vscode-dropdown-foreground);
+                    border: 1px solid var(--vscode-dropdown-border);
+                    border-radius: 4px;
+                    font-size: 12px;
+                    font-family: var(--vscode-font-family);
+                    cursor: pointer;
+                }
+                .dropdown-container select:focus {
+                    outline: 1px solid var(--vscode-focusBorder);
                 }
                 .ticket-id {
                     color: var(--vscode-textLink-foreground);
@@ -123,6 +170,12 @@ export class TicketViewProvider implements vscode.WebviewViewProvider {
             </style>
         </head>
         <body>
+            <div class="dropdown-container">
+                <select id="taskSelect">
+                    ${taskOptions}
+                </select>
+            </div>
+
             <div class="ticket-id">${task.id}</div>
             <div class="ticket-title">${task.title}</div>
             <div class="ticket-meta">
@@ -151,13 +204,25 @@ export class TicketViewProvider implements vscode.WebviewViewProvider {
                 <h3>Acceptance Criteria</h3>
                 <ul>${criteriaHtml}</ul>
             </div>
+
+            <script>
+                const select = document.getElementById('taskSelect');
+                select.addEventListener('change', () => {
+                    const vscode = acquireVsCodeApi();
+                    vscode.postMessage({
+                        type: 'taskSelected',
+                        taskId: select.value
+                    });
+                });
+            </script>
         </body>
         </html>`;
     }
 
-    public updateView(task: Task) {
+    public updateView(taskId: string) {
+        this._currentTaskId = taskId;
         if (this._view) {
-            this._view.webview.html = this._getHtmlForWebview(this._view.webview, task);
+            this._view.webview.html = this._getHtmlForWebview(this._view.webview, taskId);
         }
     }
 }

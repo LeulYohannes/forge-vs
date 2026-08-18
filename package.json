@@ -10,10 +10,12 @@
     "Other"
   ],
   "activationEvents": [
-    "*",
     "onView:forge-vs.ticketView",
     "onCommand:forge-vs.showTicketView",
-    "onCommand:forge-vs.submit"
+    "onCommand:forge-vs.submit",
+    "onCommand:forge-vs.startTask",
+    "onCommand:forge-vs.previewRun",
+    "onCommand:forge-vs.resetTelemetryConsent"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -21,6 +23,18 @@
       {
         "command": "forge-vs.submit",
         "title": "Forge AI: Submit for Evaluation"
+      },
+      {
+        "command": "forge-vs.startTask",
+        "title": "Forge AI: Start Task"
+      },
+      {
+        "command": "forge-vs.previewRun",
+        "title": "Forge AI: Preview Run (Local, Not Scored)"
+      },
+      {
+        "command": "forge-vs.resetTelemetryConsent",
+        "title": "Forge AI: Reset Telemetry Consent"
       },
       {
         "command": "forge-vs.showTicketView",
@@ -32,6 +46,11 @@
         "command": "forge-vs.submit",
         "key": "ctrl+shift+e",
         "mac": "cmd+shift+e"
+      },
+      {
+        "command": "forge-vs.previewRun",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r"
       }
     ],
     "viewsContainers": {
@@ -56,7 +75,7 @@
       "properties": {
         "forgeAI.apiUrl": {
           "type": "string",
-          "default": "http://localhost:8000",
+          "default": "https://forge-ai-core.onrender.com",
           "description": "URL of the Forge AI backend API"
         }
       }

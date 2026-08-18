@@ -1,5 +1,8 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import { spawn } from 'child_process';
 import * as vscode from 'vscode';
-import { Task, TASK_1 } from './data/taskData';
+import { Task, TASKS, TASK_1 } from './data/taskData';
 import { TicketViewProvider } from './providers/TicketViewProvider';
 
 interface EvaluationResult {
@@ -11,94 +14,290 @@ interface EvaluationResult {
     logs?: string[];
 }
 
-export function activate(context: vscode.ExtensionContext) {
-    console.log('🚀 Forge AI extension is now active!');
+interface TelemetryData {
+    preview_run_count: number;
+    time_to_first_submit_seconds: number | null;
+    total_save_count: number;
+    session_start_timestamp: number;
+}
 
-    // Register the sidebar view provider
-    const provider = new TicketViewProvider(context);
-    const registration = vscode.window.registerWebviewViewProvider(
-        'forge-vs.ticketView',
-        provider,
-        {
-            webviewOptions: {
-                retainContextWhenHidden: true
-            }
-        }
+let currentTaskId: string = 'task_1';
+let ticketProvider: TicketViewProvider | undefined;
+let previewRunInProgress = false;
+const telemetrySessions: Record<string, TelemetryData> = {};
+
+export function getTaskSolutionFileName(taskId: string): string {
+    return `${taskId}_solution.py`;
+}
+
+export function buildStarterTaskFileContent(taskId: string): string {
+    return `# Starter file for ${taskId}\n\n\ndef solution():\n    """Implement the solution for ${taskId}."""\n    pass\n`;
+}
+
+function getTelemetryConsent(context: vscode.ExtensionContext): boolean {
+    return context.globalState.get<boolean>('forgeAI.telemetryConsent') === true;
+}
+
+function getOrCreateTelemetrySession(taskId: string): TelemetryData {
+    if (!telemetrySessions[taskId]) {
+        telemetrySessions[taskId] = {
+            preview_run_count: 0,
+            time_to_first_submit_seconds: null,
+            total_save_count: 0,
+            session_start_timestamp: Date.now(),
+        };
+    }
+
+    return telemetrySessions[taskId];
+}
+
+function resetTelemetrySession(taskId: string): void {
+    telemetrySessions[taskId] = {
+        preview_run_count: 0,
+        time_to_first_submit_seconds: null,
+        total_save_count: 0,
+        session_start_timestamp: Date.now(),
+    };
+}
+
+async function promptForTelemetryConsent(context: vscode.ExtensionContext): Promise<boolean> {
+    const consentState = context.globalState.get<boolean>('forgeAI.telemetryConsent');
+    if (consentState !== undefined) {
+        return consentState === true;
+    }
+
+    const choice = await vscode.window.showInformationMessage(
+        'Forge AI can track how you work on this ticket — how many times you run a local preview, how long you take, how many times you save — to help build a more complete picture of real engineering work, not just your final answer. This is separate from your code, which is only sent when you Submit. Do you consent to this tracking?',
+        'Yes, I consent',
+        "No, don't track"
     );
-    context.subscriptions.push(registration);
-    console.log('✅ Ticket view provider registered with options');
 
-    context.subscriptions.push(
-        vscode.commands.registerCommand('forge-vs.showTicketView', async () => {
-            console.log('📌 showTicketView command executed!');
-            showTicketPanel(TASK_1);
-        })
+    const consent = choice === 'Yes, I consent';
+    await context.globalState.update('forgeAI.telemetryConsent', consent);
+    return consent;
+}
+
+function trackSaveTelemetry(context: vscode.ExtensionContext): void {
+    if (getTelemetryConsent(context) !== true) {
+        return;
+    }
+
+    const session = getOrCreateTelemetrySession(currentTaskId);
+    session.total_save_count += 1;
+}
+
+function trackPreviewTelemetry(context: vscode.ExtensionContext): void {
+    if (getTelemetryConsent(context) !== true) {
+        return;
+    }
+
+    const session = getOrCreateTelemetrySession(currentTaskId);
+    session.preview_run_count += 1;
+}
+
+function updateFirstSubmitTime(context: vscode.ExtensionContext): TelemetryData | null {
+    if (getTelemetryConsent(context) !== true) {
+        return null;
+    }
+
+    const session = getOrCreateTelemetrySession(currentTaskId);
+    if (session.time_to_first_submit_seconds === null) {
+        session.time_to_first_submit_seconds = Number(((Date.now() - session.session_start_timestamp) / 1000).toFixed(2));
+    }
+
+    return session;
+}
+
+function hasSolutionFilePattern(fileName: string): boolean {
+    return /_solution\.py$/i.test(fileName);
+}
+
+function parsePytestSummary(output: string): string {
+    const lines = output.split(/\r?\n/);
+    const summaryLine = [...lines].reverse().find((line) => /\d+\s+(passed|failed|error|skipped|xpassed|xfailed)/i.test(line));
+    if (summaryLine) {
+        return summaryLine.trim();
+    }
+
+    return output.trim() || 'Preview run finished with no summary output.';
+}
+
+async function runPreviewForFile(context: vscode.ExtensionContext, filePath: string): Promise<void> {
+    if (!filePath) {
+        vscode.window.showErrorMessage('No Python file available for preview.');
+        return;
+    }
+
+    if (previewRunInProgress) {
+        return;
+    }
+
+    previewRunInProgress = true;
+
+    try {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        const command = 'python';
+        const args = ['-m', 'pytest', filePath, '-v'];
+
+        // TODO: VERIFY — confirm the exact local test file naming/location convention with the founder before this can run correctly; DO NOT invent a fake path.
+
+        const child = spawn(command, args, {
+            cwd: workspaceFolder?.uri.fsPath,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        let output = '';
+        const timeoutMs = 10000;
+
+        child.stdout.on('data', (chunk) => {
+            output += chunk.toString();
+        });
+
+        child.stderr.on('data', (chunk) => {
+            output += chunk.toString();
+        });
+
+        const timeoutHandle = setTimeout(() => {
+            if (!child.killed) {
+                child.kill('SIGTERM');
+            }
+            output += '\nPreview run timed out — check for an infinite loop.';
+        }, timeoutMs);
+
+        await new Promise<void>((resolve) => {
+            child.on('close', () => {
+                clearTimeout(timeoutHandle);
+                resolve();
+            });
+            child.on('error', () => {
+                clearTimeout(timeoutHandle);
+                output += '\nPreview run failed to start. Ensure Python is installed and available on PATH.';
+                resolve();
+            });
+        });
+
+        const summary = parsePytestSummary(output);
+        const failed = /\d+\s+failed/i.test(summary) || /FAILURES|ERRORS/i.test(output) || /Preview run timed out/i.test(output);
+        const passed = /\d+\s+passed/i.test(summary) && !failed;
+        const feedback = output.trim() || summary;
+
+        showPreviewResultsPanel({
+            test_passed: passed,
+            ai_score: passed ? 100 : 0,
+            ai_feedback: feedback,
+            exec_error: failed ? summary : null,
+            error: failed ? summary : null,
+            logs: output.split(/\r?\n/),
+        });
+
+        trackPreviewTelemetry(context);
+    } catch (error: any) {
+        showPreviewResultsPanel({
+            test_passed: false,
+            ai_score: 0,
+            ai_feedback: error?.message || 'Preview run failed.',
+            exec_error: error?.message || 'Preview run failed.',
+            error: error?.message || 'Preview run failed.',
+            logs: [error?.message || 'Preview run failed.'],
+        });
+        trackPreviewTelemetry(context);
+    } finally {
+        previewRunInProgress = false;
+    }
+}
+
+function showPreviewResultsPanel(result: EvaluationResult) {
+    const panel = vscode.window.createWebviewPanel(
+        'forgePreviewResults',
+        'Local Preview Results',
+        vscode.ViewColumn.Beside,
+        { enableScripts: true }
     );
 
-    // Automatically open the ticket panel when the extension activates.
-    showTicketPanel(TASK_1);
-
-    // COMMAND: Submit for Evaluation (keep this working)
-    context.subscriptions.push(
-        vscode.commands.registerCommand('forge-vs.submit', async () => {
-            console.log('📤 submit command executed!');
-            
-            const editor = vscode.window.activeTextEditor;
-            if (!editor) {
-                vscode.window.showErrorMessage('No file open. Open a Python file first.');
-                return;
-            }
-
-            const code = editor.document.getText();
-            const fileName = editor.document.fileName.split('/').pop() || 'unknown.py';
-
-            await vscode.window.withProgress(
-                {
-                    location: vscode.ProgressLocation.Notification,
-                    title: `Submitting ${fileName} to Forge AI...`,
-                    cancellable: false,
-                },
-                async () => {
-                    try {
-                        const config = vscode.workspace.getConfiguration('forgeAI');
-                        const apiUrl = config.get('apiUrl') as string || 'http://localhost:8000';
-                        console.log(`🌐 API URL: ${apiUrl}`);
-
-                        const response = await fetch(`${apiUrl}/evaluate`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                code: code,
-                                task_id: 'task_1',
-                                ticket_context: '',
-                            }),
-                        });
-
-                        if (!response.ok) {
-                            const errorText = await response.text();
-                            throw new Error(`API Error (${response.status}): ${errorText}`);
-                        }
-
-                        const result = await response.json() as EvaluationResult;
-
-                        const passedText = result.test_passed ? '✅ PASSED' : '❌ FAILED';
-                        vscode.window.showInformationMessage(
-                            `Forge AI: ${passedText} (Score: ${result.ai_score}/100)`
-                        );
-
-                        showResultsPanel(result);
-
-                    } catch (error: any) {
-                        vscode.window.showErrorMessage(`Failed to submit: ${error.message}`);
-                        console.error('❌ Submit error:', error);
-                    }
+    const passed = result.test_passed ? 'passed' : 'failed';
+    const feedback = (result.ai_feedback || 'No local preview output').replace(/\n/g, '<br>');
+    panel.webview.html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    padding: 24px;
+                    background: #1e1e1e;
+                    color: #cccccc;
+                    line-height: 1.6;
                 }
-            );
-        })
-    );
+                .preview-header {
+                    text-align: center;
+                    font-size: 18px;
+                    font-weight: 700;
+                    letter-spacing: 0.08em;
+                    color: #f4c542;
+                    margin-bottom: 12px;
+                    text-transform: uppercase;
+                }
+                .score {
+                    font-size: 64px;
+                    font-weight: 700;
+                    text-align: center;
+                    padding: 20px 0 10px 0;
+                }
+                .passed { color: #4caf50; }
+                .failed { color: #f44336; }
+                .status {
+                    text-align: center;
+                    font-size: 18px;
+                    padding-bottom: 20px;
+                    border-bottom: 1px solid #333;
+                }
+                .section {
+                    margin-top: 20px;
+                }
+                .section-title {
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: #888;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                    margin-bottom: 8px;
+                }
+                .feedback {
+                    background: #2d2d2d;
+                    padding: 16px;
+                    border-radius: 6px;
+                    white-space: pre-wrap;
+                    font-size: 14px;
+                }
+                .error {
+                    color: #f44336;
+                    background: #2d1e1e;
+                    padding: 12px;
+                    border-radius: 6px;
+                    margin-top: 12px;
+                    border: 1px solid #f44336;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="preview-header">LOCAL PREVIEW — NOT YOUR OFFICIAL SCORE</div>
+            <div class="score ${passed}">${result.ai_score || 0}/100</div>
+            <div class="status">${result.test_passed ? '✅ PASSED' : '❌ FAILED'}</div>
 
-    // Remove the focusTicket command — it doesn't work reliably
-    // Users can just click the rocket icon
+            <div class="section">
+                <div class="section-title">Pytest Output</div>
+                <div class="feedback">${feedback}</div>
+            </div>
+
+            ${result.exec_error ? `
+                <div class="section">
+                    <div class="section-title">Preview Error</div>
+                    <div class="error">${result.exec_error}</div>
+                </div>
+            ` : ''}
+        </body>
+        </html>
+    `;
 }
 
 function showResultsPanel(result: EvaluationResult) {
@@ -169,7 +368,7 @@ function showResultsPanel(result: EvaluationResult) {
         <body>
             <div class="score ${passed}">${result.ai_score || 0}/100</div>
             <div class="status">${result.test_passed ? '✅ PASSED' : '❌ FAILED'}</div>
-            
+
             <div class="section">
                 <div class="section-title">Feedback</div>
                 <div class="feedback">${feedback}</div>
@@ -284,6 +483,164 @@ function showTicketPanel(task: Task) {
             </div>
         </body>
         </html>`;
+}
+
+export async function activate(context: vscode.ExtensionContext) {
+    console.log('🚀 Forge AI extension is now active!');
+
+    await promptForTelemetryConsent(context);
+
+    ticketProvider = new TicketViewProvider(context, (taskId: string) => {
+        currentTaskId = taskId;
+        console.log(`📌 Task changed to: ${taskId}`);
+        vscode.window.showInformationMessage(`📋 Switched to ${TASKS[taskId].id}: ${TASKS[taskId].title}`);
+    });
+
+    const registration = vscode.window.registerWebviewViewProvider(
+        'forge-vs.ticketView',
+        ticketProvider,
+        {
+            webviewOptions: {
+                retainContextWhenHidden: true,
+            },
+        }
+    );
+    context.subscriptions.push(registration);
+    console.log('✅ Ticket view provider registered with options');
+
+    showTicketPanel(TASK_1);
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.showTicketView', () => {
+            showTicketPanel(TASKS[currentTaskId]);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.startTask', async () => {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                vscode.window.showErrorMessage('Open a folder first, then start a task.');
+                return;
+            }
+
+            const fileName = getTaskSolutionFileName(currentTaskId);
+            const filePath = path.join(workspaceFolder.uri.fsPath, fileName);
+            const fileUri = vscode.Uri.file(filePath);
+
+            if (!fs.existsSync(filePath)) {
+                await vscode.workspace.fs.writeFile(fileUri, Buffer.from(buildStarterTaskFileContent(currentTaskId)));
+            }
+
+            const document = await vscode.workspace.openTextDocument(filePath);
+            await vscode.window.showTextDocument(document, { preview: false, viewColumn: vscode.ViewColumn.Active });
+
+            resetTelemetrySession(currentTaskId);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.previewRun', async () => {
+            const editor = vscode.window.activeTextEditor;
+            const filePath = editor?.document.fileName || vscode.window.activeTextEditor?.document.fileName;
+            if (!filePath) {
+                vscode.window.showErrorMessage('No file open. Open a Python file first.');
+                return;
+            }
+
+            await runPreviewForFile(context, filePath);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.resetTelemetryConsent', async () => {
+            await context.globalState.update('forgeAI.telemetryConsent', undefined);
+            await promptForTelemetryConsent(context);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.submit', async () => {
+            console.log(`📤 submit command executed for task: ${currentTaskId}`);
+
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+                vscode.window.showErrorMessage('No file open. Open a Python file first.');
+                return;
+            }
+
+            const code = editor.document.getText();
+            const fileName = editor.document.fileName.split('/').pop() || 'unknown.py';
+            const telemetryAllowed = getTelemetryConsent(context);
+            const session = telemetryAllowed ? updateFirstSubmitTime(context) : null;
+
+            await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: `Submitting ${fileName} for ${TASKS[currentTaskId]?.id || currentTaskId}...`,
+                    cancellable: false,
+                },
+                async () => {
+                    try {
+                        const config = vscode.workspace.getConfiguration('forgeAI');
+                        const apiUrl = process.env.FORGE_API_URL ||
+                            config.get('apiUrl') as string ||
+                            'https://forge-ai-core.onrender.com';
+                        console.log(`🌐 API URL: ${apiUrl}`);
+
+                        // BACKEND TODO: /evaluate endpoint must accept an optional 'telemetry' field in the request body and store it — not yet implemented server-side as of this extension build.
+                        const response = await fetch(`${apiUrl}/evaluate`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                code: code,
+                                task_id: currentTaskId,
+                                ticket_context: '',
+                                telemetry: telemetryAllowed ? session : null,
+                            }),
+                        });
+
+                        if (!response.ok) {
+                            const errorText = await response.text();
+                            throw new Error(`API Error (${response.status}): ${errorText}`);
+                        }
+
+                        const result = await response.json() as EvaluationResult;
+
+                        const passedText = result.test_passed ? '✅ PASSED' : '❌ FAILED';
+                        vscode.window.showInformationMessage(
+                            `Forge AI: ${passedText} (Score: ${result.ai_score}/100)`
+                        );
+
+                        showResultsPanel(result);
+                    } catch (error: any) {
+                        vscode.window.showErrorMessage(`Failed to submit: ${error.message}`);
+                        console.error('❌ Submit error:', error);
+                    }
+                }
+            );
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.workspace.onDidSaveTextDocument((document) => {
+            if (!hasSolutionFilePattern(document.fileName)) {
+                return;
+            }
+
+            if (previewRunInProgress) {
+                return;
+            }
+
+            if (getTelemetryConsent(context) !== true) {
+                return;
+            }
+
+            const session = getOrCreateTelemetrySession(currentTaskId);
+            session.total_save_count += 1;
+            void runPreviewForFile(context, document.fileName);
+        })
+    );
 }
 
 export function deactivate() {
