@@ -52,6 +52,7 @@ src/
 .vscode-test.mjs
 .vscodeignore
 CHANGELOG.md
+COPILOT_BUILD_INSTRUCTIONS.md
 esbuild.js
 eslint.config.mjs
 package.json
@@ -62,6 +63,413 @@ vsc-extension-quickstart.md
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path=".gitignore">
+out
+dist
+node_modules
+.vscode-test/
+*.vsix
+</file>
+
+<file path=".vscode-test.mjs">
+import { defineConfig } from '@vscode/test-cli';
+
+export default defineConfig({
+	files: 'out/test/**/*.test.js',
+});
+</file>
+
+<file path=".vscodeignore">
+.vscode/**
+.vscode-test/**
+out/**
+node_modules/**
+src/**
+.gitignore
+.yarnrc
+esbuild.js
+vsc-extension-quickstart.md
+**/tsconfig.json
+**/eslint.config.mjs
+**/*.map
+**/*.ts
+**/.vscode-test.*
+</file>
+
+<file path="CHANGELOG.md">
+# Change Log
+
+All notable changes to the "forge-vs" extension will be documented in this file.
+
+Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
+
+## [Unreleased]
+
+- Initial release
+</file>
+
+<file path="COPILOT_BUILD_INSTRUCTIONS.md">
+# COPILOT BUILD INSTRUCTIONS — Forge AI VS Code Extension: Local Preview + Telemetry
+
+## READ THIS FIRST — RULES THAT OVERRIDE EVERYTHING ELSE
+
+1. **Do not modify `src/data/taskData.ts` in any way.** The 5 tasks, their exact field names (`id`, `title`, `priority`, `reporter`, `skill`, `company`, `ticketType`, `context`, `description`, `acceptanceCriteria`), and their content are final and already correct. Do not rename fields, add fields to this file, or regenerate ticket content.
+2. **Do not change the existing `/evaluate` API contract.** The current `extension.ts` POSTs to `${apiUrl}/evaluate` with exactly this JSON body shape: `{ code: string, task_id: string, ticket_context: string }`, and expects back exactly this shape: `{ test_passed: boolean, ai_score: number, ai_feedback: string, exec_error?: string | null, error?: string | null, logs?: string[] }`. This is a real, already-deployed backend at `https://forge-ai-core.onrender.com`. You are NOT authorized to invent new fields on this request/response, rename existing ones, or assume the backend has endpoints other than `/evaluate`. If this build requires the backend to accept a new field (see Telemetry section below), you must ADD an optional field to the existing request body — never replace or restructure the existing contract.
+3. **Do not invent new npm packages.** Every dependency you use must already be listed in `package.json`'s `devDependencies`, or must be a Node.js built-in module (e.g. `child_process`, `crypto`). If you believe a new dependency is genuinely required, STOP and add a clearly marked `// NEEDS APPROVAL: <package name> — <why>` comment instead of installing it silently.
+4. **Do not remove or restructure `TicketViewProvider.ts`'s existing webview HTML/CSS styling patterns.** All new UI (preview results, consent dialog) must visually match the existing style: uses VS Code CSS variables (`var(--vscode-font-family)`, `var(--vscode-editor-background)`, etc.), not hardcoded colors, except where the existing `showResultsPanel` function in `extension.ts` already uses specific hex values (`#1e1e1e`, `#4caf50`, `#f44336`) — match that file's existing pattern exactly when extending it, do not introduce a third, different visual style.
+5. **If any instruction below is ambiguous or you are not fully certain of a VS Code API's exact behavior, do not guess. Insert a comment `// TODO: VERIFY — <question>` and implement the most conservative/safe version, rather than inventing plausible-sounding but unverified API usage.**
+6. **Do not add analytics/telemetry collection of any kind until the consent flow (Section 3) is fully implemented and gates all tracking.** Telemetry code that runs before consent exists is a hard failure of this spec, not a minor bug.
+
+---
+
+## CURRENT STATE OF THE CODEBASE (verified, as of this build — do not re-derive from scratch)
+
+- `src/extension.ts` — activation, registers `forge-vs.submit` command (reads active editor's full text, POSTs to backend `/evaluate`, shows result in a `createWebviewPanel` results panel), and `showTicketPanel()` (a full-panel ticket view, separate from the sidebar).
+- `src/providers/TicketViewProvider.ts` — the SIDEBAR webview (`forge-vs.ticketView`), with a `<select>` dropdown to switch between the 5 tasks. On change, posts a `taskSelected` message back to the extension host, which updates `currentTaskId` in `extension.ts`.
+- `src/data/taskData.ts` — the 5 hardcoded tickets (`task_1` through `task_5`), matching the same Meridian AI narrative used in the existing web app. Exports `TASKS` (a `Record<string, Task>`) and `TASK_1`.
+- `package.json` — `forge-vs.submit` command bound to `Ctrl+Shift+E`/`Cmd+Shift+E`. Config setting `forgeAI.apiUrl` (default `https://forge-ai-core.onrender.com`). Build via `esbuild.js`, bundled to `./dist/extension.js`.
+- **What does NOT exist yet, and is the actual scope of this build:** local preview test execution, any telemetry/consent system, any starter-file scaffolding per task.
+
+---
+
+## PART 1 — Starter File Scaffolding (build this first — everything else depends on it)
+
+Currently, `forge-vs.submit` requires the candidate to already have some file open — there is no command that creates a real starter file for the selected task. Add this.
+
+### 1.1 New command: `forge-vs.startTask`
+- Add to `package.json` `contributes.commands`: `{ "command": "forge-vs.startTask", "title": "Forge AI: Start Task" }`.
+- Add to `activationEvents`: `"onCommand:forge-vs.startTask"`.
+- Implementation (in `extension.ts` or a new `src/commands/startTask.ts` — your choice, but keep it consistent with the existing single-file style in `extension.ts` if you're unsure):
+  - Prompts nothing — uses the current `currentTaskId` (already tracked in `extension.ts`).
+  - Creates a file named exactly `${currentTaskId}_solution.py` in the currently open workspace folder (use `vscode.workspace.workspaceFolders?.[0].uri` — if no workspace folder is open, show an error message: `"Open a folder first, then start a task."` and stop; do not silently create a file in an undefined location).
+  - If the file already exists, open it as-is (do NOT overwrite existing candidate work).
+  - If it doesn't exist, create it with a minimal starter stub — a function signature with `pass` and a one-line comment referencing the ticket ID. Do not pre-write any implementation logic; this is a stub for the candidate to fill in, not a partial answer.
+  - Open the file in the editor after creating/finding it.
+
+---
+
+## PART 2 — Local Preview Run (the core missing feature)
+
+**Non-negotiable design rule, repeat of the architecture already agreed on for this project: the local preview run is NEVER the real, scored result. Only the existing `/evaluate` backend call (via `forge-vs.submit`) produces the real score. The preview run's only job is fast local feedback.**
+
+### 2.1 New command: `forge-vs.previewRun`
+- Add to `package.json`: `{ "command": "forge-vs.previewRun", "title": "Forge AI: Preview Run (Local, Not Scored)" }`. The title text "(Local, Not Scored)" is REQUIRED, not optional — this is the label that prevents candidate confusion about which result counts.
+- Keybinding: `Ctrl+Shift+R` / `Cmd+Shift+R` — do not reuse the existing submit keybinding.
+
+### 2.2 Implementation requirements
+- Use Node's built-in `child_process.spawn` (NOT `exec` — `spawn` avoids shell-injection risk from candidate code content and handles streaming output better). Do not use any third-party process-execution package.
+- Run: `python -m pytest <path to the relevant local test file> -v` against the candidate's current file. **You do not have the actual local test files' exact filenames or locations in this repo — this is a real gap.** Insert `// TODO: VERIFY — confirm the exact local test file naming/location convention with the founder before this can run correctly; DO NOT invent a fake path.**
+- Set an explicit timeout on the spawned process (recommend 10 seconds) — if it doesn't complete, kill the process and show `"Preview run timed out — check for an infinite loop."` Do not let a local preview run hang indefinitely; this directly mirrors the sandboxing discipline already used on the backend and must not be skipped just because this runs locally.
+- Parse pytest's output for a simple pass/fail count (e.g. regex or line-based parsing of pytest's summary line — do not assume a specific pytest version's exact output format without a fallback; if parsing fails, show the raw output rather than a fabricated/guessed summary).
+- Display results in a webview, styled consistently with the EXISTING `showResultsPanel` function's visual style in `extension.ts` (same dark background, same score/pass-fail color pattern) — but with a clearly different, unmistakable header reading **"LOCAL PREVIEW — NOT YOUR OFFICIAL SCORE"** in a distinct color (e.g. amber/yellow, not the existing green/red pass-fail colors) so it cannot be visually confused with a real submission result.
+
+### 2.3 Auto-trigger on save
+- Register `vscode.workspace.onDidSaveTextDocument`.
+- Only trigger if the saved file matches the current task's expected filename pattern (`*_solution.py`) — do not trigger preview runs for unrelated files the candidate might have open.
+- Debounce: if a save-triggered preview run is already in progress, ignore additional save events until it completes. Do not queue multiple overlapping runs.
+
+---
+
+## PART 3 — Telemetry with Mandatory Consent Gate
+
+### 3.1 Consent must be implemented and working BEFORE any tracking code is added or activated. This is not a suggestion — build this section first, verify it works, then proceed to 3.2.
+
+- On extension activation, check `context.globalState.get('forgeAI.telemetryConsent')`.
+- If undefined (first run), show `vscode.window.showInformationMessage` with EXACTLY this text (do not paraphrase or shorten it):
+
+  > "Forge AI can track how you work on this ticket — how many times you run a local preview, how long you take, how many times you save — to help build a more complete picture of real engineering work, not just your final answer. This is separate from your code, which is only sent when you Submit. Do you consent to this tracking?"
+
+  With two buttons: `"Yes, I consent"` and `"No, don't track"`.
+- Store the response in `context.globalState.update('forgeAI.telemetryConsent', true | false)`.
+- If the candidate selects "No," **no telemetry code below may execute at all** — not a reduced version, none. Verify this by checking the consent flag as the very first line of every telemetry-related function, and returning immediately if false or undefined.
+- Add a command `forge-vs.resetTelemetryConsent` (for testing/debugging and so a candidate can change their mind) that clears the stored flag and re-prompts on next activation.
+
+### 3.2 Exact telemetry schema — do not add, rename, or omit fields
+
+```typescript
+interface TelemetryData {
+    preview_run_count: number;       // increments each time forge-vs.previewRun completes (success or fail)
+    time_to_first_submit_seconds: number | null;  // seconds from task file creation to first forge-vs.submit call; null if not yet submitted
+    total_save_count: number;        // increments on every onDidSaveTextDocument for the task's solution file
+    session_start_timestamp: number; // Date.now() when forge-vs.startTask was called
+}
+```
+
+- Store this per-task-session in memory (a module-level object keyed by `taskId`, reset when `forge-vs.startTask` is called for a new session) — do NOT persist telemetry to disk beyond the current VS Code session unless explicitly asked to add persistence later.
+- Track `session_start_timestamp` when `forge-vs.startTask` runs (Part 1).
+- Increment `preview_run_count` in the preview run handler (Part 2), AFTER checking consent.
+- Increment `total_save_count` in the save listener, AFTER checking consent.
+- Calculate `time_to_first_submit_seconds` inside the EXISTING `forge-vs.submit` command handler, only on the first submit of a session (check if it's already been set; do not overwrite on subsequent submits within the same session).
+
+### 3.3 Sending telemetry with the real submission
+- In the existing `forge-vs.submit` command handler in `extension.ts`, extend the existing POST body — **add** a new optional field, do not restructure the existing ones:
+  ```typescript
+  body: JSON.stringify({
+      code: code,
+      task_id: currentTaskId,
+      ticket_context: '',
+      telemetry: telemetryConsentGiven ? currentSessionTelemetry : null,  // null if no consent
+  })
+  ```
+- **This requires a corresponding backend change to accept and store this new optional `telemetry` field — that backend change is OUT OF SCOPE for this extension build.** Insert a clear comment: `// BACKEND TODO: /evaluate endpoint must accept an optional 'telemetry' field in the request body and store it — not yet implemented server-side as of this extension build.` Do not assume the backend already handles this field silently; flag it explicitly so it isn't missed.
+
+---
+
+## PART 4 — Explicit Testing Checklist (self-verify against this before considering the build done)
+
+- [ ] `forge-vs.startTask` creates a real file, does not overwrite existing candidate work if the file already exists.
+- [ ] `forge-vs.previewRun` never hangs indefinitely (timeout confirmed working by testing against an intentional infinite loop).
+- [ ] Preview run results are visually and textually unmistakable from real submission results (different header, different color).
+- [ ] Telemetry consent prompt appears on first activation, and NEVER again after a choice is made (unless `forge-vs.resetTelemetryConsent` is run).
+- [ ] With consent declined, confirm via testing that `preview_run_count`, `total_save_count`, etc. are never sent and never even incremented — not just hidden.
+- [ ] The existing `forge-vs.submit` flow (already working) still functions identically to before for the `code`, `task_id`, and `ticket_context` fields — this build must not break existing, working functionality.
+- [ ] `taskData.ts` is byte-for-byte unchanged from its current state.
+
+---
+
+## OPTIONAL LOW-PRIORITY CLEANUP (do only after Parts 1–4 are complete and verified — do not let this distract from the core build)
+
+- `package.json`'s `activationEvents` currently includes `"*"` alongside specific events like `"onView:forge-vs.ticketView"`. The `"*"` activates the extension on every VS Code startup regardless of use, which is discouraged practice and unnecessary given the specific events already listed. If touching this file for Part 1/3 additions anyway, it is safe to remove `"*"` — but do not do this as a standalone change without also verifying the extension still activates correctly via its specific events afterward.
+- `extension.ts` reads `process.env.FORGE_API_URL` as a fallback before the VS Code configuration setting — `process.env` in a packaged, shipped extension reflects the environment of whoever built the `.vsix`, not the end user's machine, so this fallback is likely dead/misleading code in production. Flag with a comment if noticed; do not silently remove without confirmation, since it may be intentional for the founder's own local dev testing.
+</file>
+
+<file path="esbuild.js">
+const esbuild = require("esbuild");
+
+const production = process.argv.includes('--production');
+const watch = process.argv.includes('--watch');
+
+/**
+ * @type {import('esbuild').Plugin}
+ */
+const esbuildProblemMatcherPlugin = {
+	name: 'esbuild-problem-matcher',
+
+	setup(build) {
+		build.onStart(() => {
+			console.log('[watch] build started');
+		});
+		build.onEnd((result) => {
+			result.errors.forEach(({ text, location }) => {
+				console.error(`✘ [ERROR] ${text}`);
+				console.error(`    ${location.file}:${location.line}:${location.column}:`);
+			});
+			console.log('[watch] build finished');
+		});
+	},
+};
+
+async function main() {
+	const ctx = await esbuild.context({
+		entryPoints: [
+			'src/extension.ts'
+		],
+		bundle: true,
+		format: 'cjs',
+		minify: production,
+		sourcemap: !production,
+		sourcesContent: false,
+		platform: 'node',
+		outfile: 'dist/extension.js',
+		external: ['vscode'],
+		logLevel: 'silent',
+		plugins: [
+			/* add to the end of plugins array */
+			esbuildProblemMatcherPlugin,
+		],
+	});
+	if (watch) {
+		await ctx.watch();
+	} else {
+		await ctx.rebuild();
+		await ctx.dispose();
+	}
+}
+
+main().catch(e => {
+	console.error(e);
+	process.exit(1);
+});
+</file>
+
+<file path="eslint.config.mjs">
+import typescriptEslint from "typescript-eslint";
+
+export default [{
+    files: ["**/*.ts"],
+}, {
+    plugins: {
+        "@typescript-eslint": typescriptEslint.plugin,
+    },
+
+    languageOptions: {
+        parser: typescriptEslint.parser,
+        ecmaVersion: 2022,
+        sourceType: "module",
+    },
+
+    rules: {
+        "@typescript-eslint/naming-convention": ["warn", {
+            selector: "import",
+            format: ["camelCase", "PascalCase"],
+        }],
+
+        curly: "warn",
+        eqeqeq: "warn",
+        "no-throw-literal": "warn",
+        semi: "warn",
+    },
+}];
+</file>
+
+<file path="README.md">
+# forge-vs README
+
+This is the README for your extension "forge-vs". After writing up a brief description, we recommend including the following sections.
+
+## Features
+
+Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+
+For example if there is an image subfolder under your extension project workspace:
+
+\!\[feature X\]\(images/feature-x.png\)
+
+> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+
+## Requirements
+
+If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+
+## Extension Settings
+
+Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+
+For example:
+
+This extension contributes the following settings:
+
+* `myExtension.enable`: Enable/disable this extension.
+* `myExtension.thing`: Set to `blah` to do something.
+
+## Known Issues
+
+Calling out known issues can help limit users opening duplicate issues against your extension.
+
+## Release Notes
+
+Users appreciate release notes as you update your extension.
+
+### 1.0.0
+
+Initial release of ...
+
+### 1.0.1
+
+Fixed issue #.
+
+### 1.1.0
+
+Added features X, Y, and Z.
+
+---
+
+## Following extension guidelines
+
+Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
+
+* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
+
+## Working with Markdown
+
+You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
+
+* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
+* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
+* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
+
+## For more information
+
+* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
+* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
+
+**Enjoy!**
+</file>
+
+<file path="tsconfig.json">
+{
+    "compilerOptions": {
+        "module": "Node16",
+        "target": "ES2022",
+        "lib": [
+            "ES2022"
+        ],
+        "types": [
+            "node",
+            "mocha"
+        ],
+        "sourceMap": true,
+        "rootDir": "src",
+        "strict": true, /* enable all strict type-checking options */
+        /* Additional Checks */
+        // "noImplicitReturns": true, /* Report error when not all code paths in function return a value. */
+        // "noFallthroughCasesInSwitch": true, /* Report errors for fallthrough cases in switch statement. */
+        // "noUnusedParameters": true,  /* Report errors on unused parameters. */
+    }
+}
+</file>
+
+<file path="vsc-extension-quickstart.md">
+# Welcome to your VS Code Extension
+
+## What's in the folder
+
+* This folder contains all of the files necessary for your extension.
+* `package.json` - this is the manifest file in which you declare your extension and command.
+  * The sample plugin registers a command and defines its title and command name. With this information VS Code can show the command in the command palette. It doesn’t yet need to load the plugin.
+* `src/extension.ts` - this is the main file where you will provide the implementation of your command.
+  * The file exports one function, `activate`, which is called the very first time your extension is activated (in this case by executing the command). Inside the `activate` function we call `registerCommand`.
+  * We pass the function containing the implementation of the command as the second parameter to `registerCommand`.
+
+## Setup
+
+* install the recommended extensions (amodio.tsl-problem-matcher, ms-vscode.extension-test-runner, and dbaeumer.vscode-eslint)
+
+
+## Get up and running straight away
+
+* Press `F5` to open a new window with your extension loaded.
+* Run your command from the command palette by pressing (`Ctrl+Shift+P` or `Cmd+Shift+P` on Mac) and typing `Hello World`.
+* Set breakpoints in your code inside `src/extension.ts` to debug your extension.
+* Find output from your extension in the debug console.
+
+## Make changes
+
+* You can relaunch the extension from the debug toolbar after changing code in `src/extension.ts`.
+* You can also reload (`Ctrl+R` or `Cmd+R` on Mac) the VS Code window with your extension to load your changes.
+
+
+## Explore the API
+
+* You can open the full set of our API when you open the file `node_modules/@types/vscode/index.d.ts`.
+
+## Run tests
+
+* Install the [Extension Test Runner](https://marketplace.visualstudio.com/items?itemName=ms-vscode.extension-test-runner)
+* Run the "watch" task via the **Tasks: Run Task** command. Make sure this is running, or tests might not be discovered.
+* Open the Testing view from the activity bar and click the Run Test" button, or use the hotkey `Ctrl/Cmd + ; A`
+* See the output of the test result in the Test Results view.
+* Make changes to `src/test/extension.test.ts` or create new test files inside the `test` folder.
+  * The provided test runner will only consider files matching the name pattern `**.test.ts`.
+  * You can create folders inside the `test` folder to structure your tests any way you want.
+
+## Go further
+
+* Reduce the extension size and improve the startup time by [bundling your extension](https://code.visualstudio.com/api/working-with-extensions/bundling-extension).
+* [Publish your extension](https://code.visualstudio.com/api/working-with-extensions/publishing-extension) on the VS Code extension marketplace.
+* Automate builds by setting up [Continuous Integration](https://code.visualstudio.com/api/working-with-extensions/continuous-integration).
+</file>
 
 <file path="src/data/taskData.ts">
 export interface Task {
@@ -616,305 +1024,29 @@ export class TicketViewProvider implements vscode.WebviewViewProvider {
 
 <file path="src/test/extension.test.ts">
 import * as assert from 'assert';
-
-// You can import and use all API from the 'vscode' module
-// as well as import your extension to test it
 import * as vscode from 'vscode';
-// import * as myExtension from '../../extension';
+import { buildStarterTaskFileContent, getTaskSolutionFileName } from '../extension';
 
 suite('Extension Test Suite', () => {
 	vscode.window.showInformationMessage('Start all tests.');
 
-	test('Sample test', () => {
-		assert.strictEqual(-1, [1, 2, 3].indexOf(5));
-		assert.strictEqual(-1, [1, 2, 3].indexOf(0));
+	test('starter file name maps to the current task', () => {
+		assert.strictEqual(getTaskSolutionFileName('task_2'), 'task_2_solution.py');
+	});
+
+	test('starter file content includes the ticket id and a minimal stub', () => {
+		const fileContent = buildStarterTaskFileContent('task_3');
+		assert.match(fileContent, /task_3/);
+		assert.match(fileContent, /def .*\(\)\s*:/);
+		assert.match(fileContent, /pass/);
 	});
 });
-</file>
-
-<file path=".gitignore">
-out
-dist
-node_modules
-.vscode-test/
-*.vsix
-</file>
-
-<file path=".vscode-test.mjs">
-import { defineConfig } from '@vscode/test-cli';
-
-export default defineConfig({
-	files: 'out/test/**/*.test.js',
-});
-</file>
-
-<file path=".vscodeignore">
-.vscode/**
-.vscode-test/**
-out/**
-node_modules/**
-src/**
-.gitignore
-.yarnrc
-esbuild.js
-vsc-extension-quickstart.md
-**/tsconfig.json
-**/eslint.config.mjs
-**/*.map
-**/*.ts
-**/.vscode-test.*
-</file>
-
-<file path="CHANGELOG.md">
-# Change Log
-
-All notable changes to the "forge-vs" extension will be documented in this file.
-
-Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
-
-## [Unreleased]
-
-- Initial release
-</file>
-
-<file path="esbuild.js">
-const esbuild = require("esbuild");
-
-const production = process.argv.includes('--production');
-const watch = process.argv.includes('--watch');
-
-/**
- * @type {import('esbuild').Plugin}
- */
-const esbuildProblemMatcherPlugin = {
-	name: 'esbuild-problem-matcher',
-
-	setup(build) {
-		build.onStart(() => {
-			console.log('[watch] build started');
-		});
-		build.onEnd((result) => {
-			result.errors.forEach(({ text, location }) => {
-				console.error(`✘ [ERROR] ${text}`);
-				console.error(`    ${location.file}:${location.line}:${location.column}:`);
-			});
-			console.log('[watch] build finished');
-		});
-	},
-};
-
-async function main() {
-	const ctx = await esbuild.context({
-		entryPoints: [
-			'src/extension.ts'
-		],
-		bundle: true,
-		format: 'cjs',
-		minify: production,
-		sourcemap: !production,
-		sourcesContent: false,
-		platform: 'node',
-		outfile: 'dist/extension.js',
-		external: ['vscode'],
-		logLevel: 'silent',
-		plugins: [
-			/* add to the end of plugins array */
-			esbuildProblemMatcherPlugin,
-		],
-	});
-	if (watch) {
-		await ctx.watch();
-	} else {
-		await ctx.rebuild();
-		await ctx.dispose();
-	}
-}
-
-main().catch(e => {
-	console.error(e);
-	process.exit(1);
-});
-</file>
-
-<file path="eslint.config.mjs">
-import typescriptEslint from "typescript-eslint";
-
-export default [{
-    files: ["**/*.ts"],
-}, {
-    plugins: {
-        "@typescript-eslint": typescriptEslint.plugin,
-    },
-
-    languageOptions: {
-        parser: typescriptEslint.parser,
-        ecmaVersion: 2022,
-        sourceType: "module",
-    },
-
-    rules: {
-        "@typescript-eslint/naming-convention": ["warn", {
-            selector: "import",
-            format: ["camelCase", "PascalCase"],
-        }],
-
-        curly: "warn",
-        eqeqeq: "warn",
-        "no-throw-literal": "warn",
-        semi: "warn",
-    },
-}];
-</file>
-
-<file path="README.md">
-# forge-vs README
-
-This is the README for your extension "forge-vs". After writing up a brief description, we recommend including the following sections.
-
-## Features
-
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
-
-For example if there is an image subfolder under your extension project workspace:
-
-\!\[feature X\]\(images/feature-x.png\)
-
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
-
-## Requirements
-
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
-
-## Extension Settings
-
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
-
-For example:
-
-This extension contributes the following settings:
-
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
-
-## Known Issues
-
-Calling out known issues can help limit users opening duplicate issues against your extension.
-
-## Release Notes
-
-Users appreciate release notes as you update your extension.
-
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
-
----
-
-## Following extension guidelines
-
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
-
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
-
-## Working with Markdown
-
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
-
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
-
-## For more information
-
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
-</file>
-
-<file path="tsconfig.json">
-{
-    "compilerOptions": {
-        "module": "Node16",
-        "target": "ES2022",
-        "lib": [
-            "ES2022"
-        ],
-        "types": [
-            "node",
-            "mocha"
-        ],
-        "sourceMap": true,
-        "rootDir": "src",
-        "strict": true, /* enable all strict type-checking options */
-        /* Additional Checks */
-        // "noImplicitReturns": true, /* Report error when not all code paths in function return a value. */
-        // "noFallthroughCasesInSwitch": true, /* Report errors for fallthrough cases in switch statement. */
-        // "noUnusedParameters": true,  /* Report errors on unused parameters. */
-    }
-}
-</file>
-
-<file path="vsc-extension-quickstart.md">
-# Welcome to your VS Code Extension
-
-## What's in the folder
-
-* This folder contains all of the files necessary for your extension.
-* `package.json` - this is the manifest file in which you declare your extension and command.
-  * The sample plugin registers a command and defines its title and command name. With this information VS Code can show the command in the command palette. It doesn’t yet need to load the plugin.
-* `src/extension.ts` - this is the main file where you will provide the implementation of your command.
-  * The file exports one function, `activate`, which is called the very first time your extension is activated (in this case by executing the command). Inside the `activate` function we call `registerCommand`.
-  * We pass the function containing the implementation of the command as the second parameter to `registerCommand`.
-
-## Setup
-
-* install the recommended extensions (amodio.tsl-problem-matcher, ms-vscode.extension-test-runner, and dbaeumer.vscode-eslint)
-
-
-## Get up and running straight away
-
-* Press `F5` to open a new window with your extension loaded.
-* Run your command from the command palette by pressing (`Ctrl+Shift+P` or `Cmd+Shift+P` on Mac) and typing `Hello World`.
-* Set breakpoints in your code inside `src/extension.ts` to debug your extension.
-* Find output from your extension in the debug console.
-
-## Make changes
-
-* You can relaunch the extension from the debug toolbar after changing code in `src/extension.ts`.
-* You can also reload (`Ctrl+R` or `Cmd+R` on Mac) the VS Code window with your extension to load your changes.
-
-
-## Explore the API
-
-* You can open the full set of our API when you open the file `node_modules/@types/vscode/index.d.ts`.
-
-## Run tests
-
-* Install the [Extension Test Runner](https://marketplace.visualstudio.com/items?itemName=ms-vscode.extension-test-runner)
-* Run the "watch" task via the **Tasks: Run Task** command. Make sure this is running, or tests might not be discovered.
-* Open the Testing view from the activity bar and click the Run Test" button, or use the hotkey `Ctrl/Cmd + ; A`
-* See the output of the test result in the Test Results view.
-* Make changes to `src/test/extension.test.ts` or create new test files inside the `test` folder.
-  * The provided test runner will only consider files matching the name pattern `**.test.ts`.
-  * You can create folders inside the `test` folder to structure your tests any way you want.
-
-## Go further
-
-* Reduce the extension size and improve the startup time by [bundling your extension](https://code.visualstudio.com/api/working-with-extensions/bundling-extension).
-* [Publish your extension](https://code.visualstudio.com/api/working-with-extensions/publishing-extension) on the VS Code extension marketplace.
-* Automate builds by setting up [Continuous Integration](https://code.visualstudio.com/api/working-with-extensions/continuous-integration).
 </file>
 
 <file path="src/extension.ts">
+import * as fs from 'fs';
+import * as path from 'path';
+import { spawn } from 'child_process';
 import * as vscode from 'vscode';
 import { Task, TASKS, TASK_1 } from './data/taskData';
 import { TicketViewProvider } from './providers/TicketViewProvider';
@@ -928,94 +1060,290 @@ interface EvaluationResult {
     logs?: string[];
 }
 
+interface TelemetryData {
+    preview_run_count: number;
+    time_to_first_submit_seconds: number | null;
+    total_save_count: number;
+    session_start_timestamp: number;
+}
+
 let currentTaskId: string = 'task_1';
 let ticketProvider: TicketViewProvider | undefined;
+let previewRunInProgress = false;
+const telemetrySessions: Record<string, TelemetryData> = {};
 
-export function activate(context: vscode.ExtensionContext) {
-    console.log('🚀 Forge AI extension is now active!');
+export function getTaskSolutionFileName(taskId: string): string {
+    return `${taskId}_solution.py`;
+}
 
-    // Register the sidebar view provider with task selection callback
-    ticketProvider = new TicketViewProvider(context, (taskId: string) => {
-        currentTaskId = taskId;
-        console.log(`📌 Task changed to: ${taskId}`);
-        vscode.window.showInformationMessage(`📋 Switched to ${TASKS[taskId].id}: ${TASKS[taskId].title}`);
-    });
+export function buildStarterTaskFileContent(taskId: string): string {
+    return `# Starter file for ${taskId}\n\n\ndef solution():\n    """Implement the solution for ${taskId}."""\n    pass\n`;
+}
 
-    const registration = vscode.window.registerWebviewViewProvider(
-        'forge-vs.ticketView',
-        ticketProvider,
-        {
-            webviewOptions: {
-                retainContextWhenHidden: true
-            }
-        }
+function getTelemetryConsent(context: vscode.ExtensionContext): boolean {
+    return context.globalState.get<boolean>('forgeAI.telemetryConsent') === true;
+}
+
+function getOrCreateTelemetrySession(taskId: string): TelemetryData {
+    if (!telemetrySessions[taskId]) {
+        telemetrySessions[taskId] = {
+            preview_run_count: 0,
+            time_to_first_submit_seconds: null,
+            total_save_count: 0,
+            session_start_timestamp: Date.now(),
+        };
+    }
+
+    return telemetrySessions[taskId];
+}
+
+function resetTelemetrySession(taskId: string): void {
+    telemetrySessions[taskId] = {
+        preview_run_count: 0,
+        time_to_first_submit_seconds: null,
+        total_save_count: 0,
+        session_start_timestamp: Date.now(),
+    };
+}
+
+async function promptForTelemetryConsent(context: vscode.ExtensionContext): Promise<boolean> {
+    const consentState = context.globalState.get<boolean>('forgeAI.telemetryConsent');
+    if (consentState !== undefined) {
+        return consentState === true;
+    }
+
+    const choice = await vscode.window.showInformationMessage(
+        'Forge AI can track how you work on this ticket — how many times you run a local preview, how long you take, how many times you save — to help build a more complete picture of real engineering work, not just your final answer. This is separate from your code, which is only sent when you Submit. Do you consent to this tracking?',
+        'Yes, I consent',
+        "No, don't track"
     );
-    context.subscriptions.push(registration);
-    console.log('✅ Ticket view provider registered with options');
 
-    // Show initial ticket panel
-    showTicketPanel(TASK_1);
+    const consent = choice === 'Yes, I consent';
+    await context.globalState.update('forgeAI.telemetryConsent', consent);
+    return consent;
+}
 
-    // COMMAND: Submit for Evaluation
-    context.subscriptions.push(
-        vscode.commands.registerCommand('forge-vs.submit', async () => {
-            console.log(`📤 submit command executed for task: ${currentTaskId}`);
-            
-            const editor = vscode.window.activeTextEditor;
-            if (!editor) {
-                vscode.window.showErrorMessage('No file open. Open a Python file first.');
-                return;
+function trackSaveTelemetry(context: vscode.ExtensionContext): void {
+    if (getTelemetryConsent(context) !== true) {
+        return;
+    }
+
+    const session = getOrCreateTelemetrySession(currentTaskId);
+    session.total_save_count += 1;
+}
+
+function trackPreviewTelemetry(context: vscode.ExtensionContext): void {
+    if (getTelemetryConsent(context) !== true) {
+        return;
+    }
+
+    const session = getOrCreateTelemetrySession(currentTaskId);
+    session.preview_run_count += 1;
+}
+
+function updateFirstSubmitTime(context: vscode.ExtensionContext): TelemetryData | null {
+    if (getTelemetryConsent(context) !== true) {
+        return null;
+    }
+
+    const session = getOrCreateTelemetrySession(currentTaskId);
+    if (session.time_to_first_submit_seconds === null) {
+        session.time_to_first_submit_seconds = Number(((Date.now() - session.session_start_timestamp) / 1000).toFixed(2));
+    }
+
+    return session;
+}
+
+function hasSolutionFilePattern(fileName: string): boolean {
+    return /_solution\.py$/i.test(fileName);
+}
+
+function parsePytestSummary(output: string): string {
+    const lines = output.split(/\r?\n/);
+    const summaryLine = [...lines].reverse().find((line) => /\d+\s+(passed|failed|error|skipped|xpassed|xfailed)/i.test(line));
+    if (summaryLine) {
+        return summaryLine.trim();
+    }
+
+    return output.trim() || 'Preview run finished with no summary output.';
+}
+
+async function runPreviewForFile(context: vscode.ExtensionContext, filePath: string): Promise<void> {
+    if (!filePath) {
+        vscode.window.showErrorMessage('No Python file available for preview.');
+        return;
+    }
+
+    if (previewRunInProgress) {
+        return;
+    }
+
+    previewRunInProgress = true;
+
+    try {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        const command = 'python';
+        const args = ['-m', 'pytest', filePath, '-v'];
+
+        // TODO: VERIFY — confirm the exact local test file naming/location convention with the founder before this can run correctly; DO NOT invent a fake path.
+
+        const child = spawn(command, args, {
+            cwd: workspaceFolder?.uri.fsPath,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        let output = '';
+        const timeoutMs = 10000;
+
+        child.stdout.on('data', (chunk) => {
+            output += chunk.toString();
+        });
+
+        child.stderr.on('data', (chunk) => {
+            output += chunk.toString();
+        });
+
+        const timeoutHandle = setTimeout(() => {
+            if (!child.killed) {
+                child.kill('SIGTERM');
             }
+            output += '\nPreview run timed out — check for an infinite loop.';
+        }, timeoutMs);
 
-            const code = editor.document.getText();
-            const fileName = editor.document.fileName.split('/').pop() || 'unknown.py';
+        await new Promise<void>((resolve) => {
+            child.on('close', () => {
+                clearTimeout(timeoutHandle);
+                resolve();
+            });
+            child.on('error', () => {
+                clearTimeout(timeoutHandle);
+                output += '\nPreview run failed to start. Ensure Python is installed and available on PATH.';
+                resolve();
+            });
+        });
 
-            await vscode.window.withProgress(
-                {
-                    location: vscode.ProgressLocation.Notification,
-                    title: `Submitting ${fileName} for ${TASKS[currentTaskId]?.id || currentTaskId}...`,
-                    cancellable: false,
-                },
-                async () => {
-                    try {
-                        const config = vscode.workspace.getConfiguration('forgeAI');
-                        const apiUrl = process.env.FORGE_API_URL || 
-                                       config.get('apiUrl') as string || 
-                                       'https://forge-ai-core.onrender.com';
-                        console.log(`🌐 API URL: ${apiUrl}`);
+        const summary = parsePytestSummary(output);
+        const failed = /\d+\s+failed/i.test(summary) || /FAILURES|ERRORS/i.test(output) || /Preview run timed out/i.test(output);
+        const passed = /\d+\s+passed/i.test(summary) && !failed;
+        const feedback = output.trim() || summary;
 
-                        const response = await fetch(`${apiUrl}/evaluate`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                code: code,
-                                task_id: currentTaskId,
-                                ticket_context: '',
-                            }),
-                        });
+        showPreviewResultsPanel({
+            test_passed: passed,
+            ai_score: passed ? 100 : 0,
+            ai_feedback: feedback,
+            exec_error: failed ? summary : null,
+            error: failed ? summary : null,
+            logs: output.split(/\r?\n/),
+        });
 
-                        if (!response.ok) {
-                            const errorText = await response.text();
-                            throw new Error(`API Error (${response.status}): ${errorText}`);
-                        }
+        trackPreviewTelemetry(context);
+    } catch (error: any) {
+        showPreviewResultsPanel({
+            test_passed: false,
+            ai_score: 0,
+            ai_feedback: error?.message || 'Preview run failed.',
+            exec_error: error?.message || 'Preview run failed.',
+            error: error?.message || 'Preview run failed.',
+            logs: [error?.message || 'Preview run failed.'],
+        });
+        trackPreviewTelemetry(context);
+    } finally {
+        previewRunInProgress = false;
+    }
+}
 
-                        const result = await response.json() as EvaluationResult;
+function showPreviewResultsPanel(result: EvaluationResult) {
+    const panel = vscode.window.createWebviewPanel(
+        'forgePreviewResults',
+        'Local Preview Results',
+        vscode.ViewColumn.Beside,
+        { enableScripts: true }
+    );
 
-                        const passedText = result.test_passed ? '✅ PASSED' : '❌ FAILED';
-                        vscode.window.showInformationMessage(
-                            `Forge AI: ${passedText} (Score: ${result.ai_score}/100)`
-                        );
-
-                        showResultsPanel(result);
-
-                    } catch (error: any) {
-                        vscode.window.showErrorMessage(`Failed to submit: ${error.message}`);
-                        console.error('❌ Submit error:', error);
-                    }
+    const passed = result.test_passed ? 'passed' : 'failed';
+    const feedback = (result.ai_feedback || 'No local preview output').replace(/\n/g, '<br>');
+    panel.webview.html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    padding: 24px;
+                    background: #1e1e1e;
+                    color: #cccccc;
+                    line-height: 1.6;
                 }
-            );
-        })
-    );
+                .preview-header {
+                    text-align: center;
+                    font-size: 18px;
+                    font-weight: 700;
+                    letter-spacing: 0.08em;
+                    color: #f4c542;
+                    margin-bottom: 12px;
+                    text-transform: uppercase;
+                }
+                .score {
+                    font-size: 64px;
+                    font-weight: 700;
+                    text-align: center;
+                    padding: 20px 0 10px 0;
+                }
+                .passed { color: #4caf50; }
+                .failed { color: #f44336; }
+                .status {
+                    text-align: center;
+                    font-size: 18px;
+                    padding-bottom: 20px;
+                    border-bottom: 1px solid #333;
+                }
+                .section {
+                    margin-top: 20px;
+                }
+                .section-title {
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: #888;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                    margin-bottom: 8px;
+                }
+                .feedback {
+                    background: #2d2d2d;
+                    padding: 16px;
+                    border-radius: 6px;
+                    white-space: pre-wrap;
+                    font-size: 14px;
+                }
+                .error {
+                    color: #f44336;
+                    background: #2d1e1e;
+                    padding: 12px;
+                    border-radius: 6px;
+                    margin-top: 12px;
+                    border: 1px solid #f44336;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="preview-header">LOCAL PREVIEW — NOT YOUR OFFICIAL SCORE</div>
+            <div class="score ${passed}">${result.ai_score || 0}/100</div>
+            <div class="status">${result.test_passed ? '✅ PASSED' : '❌ FAILED'}</div>
+
+            <div class="section">
+                <div class="section-title">Pytest Output</div>
+                <div class="feedback">${feedback}</div>
+            </div>
+
+            ${result.exec_error ? `
+                <div class="section">
+                    <div class="section-title">Preview Error</div>
+                    <div class="error">${result.exec_error}</div>
+                </div>
+            ` : ''}
+        </body>
+        </html>
+    `;
 }
 
 function showResultsPanel(result: EvaluationResult) {
@@ -1086,7 +1414,7 @@ function showResultsPanel(result: EvaluationResult) {
         <body>
             <div class="score ${passed}">${result.ai_score || 0}/100</div>
             <div class="status">${result.test_passed ? '✅ PASSED' : '❌ FAILED'}</div>
-            
+
             <div class="section">
                 <div class="section-title">Feedback</div>
                 <div class="feedback">${feedback}</div>
@@ -1203,6 +1531,164 @@ function showTicketPanel(task: Task) {
         </html>`;
 }
 
+export async function activate(context: vscode.ExtensionContext) {
+    console.log('🚀 Forge AI extension is now active!');
+
+    await promptForTelemetryConsent(context);
+
+    ticketProvider = new TicketViewProvider(context, (taskId: string) => {
+        currentTaskId = taskId;
+        console.log(`📌 Task changed to: ${taskId}`);
+        vscode.window.showInformationMessage(`📋 Switched to ${TASKS[taskId].id}: ${TASKS[taskId].title}`);
+    });
+
+    const registration = vscode.window.registerWebviewViewProvider(
+        'forge-vs.ticketView',
+        ticketProvider,
+        {
+            webviewOptions: {
+                retainContextWhenHidden: true,
+            },
+        }
+    );
+    context.subscriptions.push(registration);
+    console.log('✅ Ticket view provider registered with options');
+
+    showTicketPanel(TASK_1);
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.showTicketView', () => {
+            showTicketPanel(TASKS[currentTaskId]);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.startTask', async () => {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                vscode.window.showErrorMessage('Open a folder first, then start a task.');
+                return;
+            }
+
+            const fileName = getTaskSolutionFileName(currentTaskId);
+            const filePath = path.join(workspaceFolder.uri.fsPath, fileName);
+            const fileUri = vscode.Uri.file(filePath);
+
+            if (!fs.existsSync(filePath)) {
+                await vscode.workspace.fs.writeFile(fileUri, Buffer.from(buildStarterTaskFileContent(currentTaskId)));
+            }
+
+            const document = await vscode.workspace.openTextDocument(filePath);
+            await vscode.window.showTextDocument(document, { preview: false, viewColumn: vscode.ViewColumn.Active });
+
+            resetTelemetrySession(currentTaskId);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.previewRun', async () => {
+            const editor = vscode.window.activeTextEditor;
+            const filePath = editor?.document.fileName || vscode.window.activeTextEditor?.document.fileName;
+            if (!filePath) {
+                vscode.window.showErrorMessage('No file open. Open a Python file first.');
+                return;
+            }
+
+            await runPreviewForFile(context, filePath);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.resetTelemetryConsent', async () => {
+            await context.globalState.update('forgeAI.telemetryConsent', undefined);
+            await promptForTelemetryConsent(context);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.submit', async () => {
+            console.log(`📤 submit command executed for task: ${currentTaskId}`);
+
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+                vscode.window.showErrorMessage('No file open. Open a Python file first.');
+                return;
+            }
+
+            const code = editor.document.getText();
+            const fileName = editor.document.fileName.split('/').pop() || 'unknown.py';
+            const telemetryAllowed = getTelemetryConsent(context);
+            const session = telemetryAllowed ? updateFirstSubmitTime(context) : null;
+
+            await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: `Submitting ${fileName} for ${TASKS[currentTaskId]?.id || currentTaskId}...`,
+                    cancellable: false,
+                },
+                async () => {
+                    try {
+                        const config = vscode.workspace.getConfiguration('forgeAI');
+                        const apiUrl = process.env.FORGE_API_URL ||
+                            config.get('apiUrl') as string ||
+                            'https://forge-ai-core.onrender.com';
+                        console.log(`🌐 API URL: ${apiUrl}`);
+
+                        // BACKEND TODO: /evaluate endpoint must accept an optional 'telemetry' field in the request body and store it — not yet implemented server-side as of this extension build.
+                        const response = await fetch(`${apiUrl}/evaluate`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                code: code,
+                                task_id: currentTaskId,
+                                ticket_context: '',
+                                telemetry: telemetryAllowed ? session : null,
+                            }),
+                        });
+
+                        if (!response.ok) {
+                            const errorText = await response.text();
+                            throw new Error(`API Error (${response.status}): ${errorText}`);
+                        }
+
+                        const result = await response.json() as EvaluationResult;
+
+                        const passedText = result.test_passed ? '✅ PASSED' : '❌ FAILED';
+                        vscode.window.showInformationMessage(
+                            `Forge AI: ${passedText} (Score: ${result.ai_score}/100)`
+                        );
+
+                        showResultsPanel(result);
+                    } catch (error: any) {
+                        vscode.window.showErrorMessage(`Failed to submit: ${error.message}`);
+                        console.error('❌ Submit error:', error);
+                    }
+                }
+            );
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.workspace.onDidSaveTextDocument((document) => {
+            if (!hasSolutionFilePattern(document.fileName)) {
+                return;
+            }
+
+            if (previewRunInProgress) {
+                return;
+            }
+
+            if (getTelemetryConsent(context) !== true) {
+                return;
+            }
+
+            const session = getOrCreateTelemetrySession(currentTaskId);
+            session.total_save_count += 1;
+            void runPreviewForFile(context, document.fileName);
+        })
+    );
+}
+
 export function deactivate() {
     console.log('👋 Forge AI extension deactivated');
 }
@@ -1221,10 +1707,12 @@ export function deactivate() {
     "Other"
   ],
   "activationEvents": [
-    "*",
     "onView:forge-vs.ticketView",
     "onCommand:forge-vs.showTicketView",
-    "onCommand:forge-vs.submit"
+    "onCommand:forge-vs.submit",
+    "onCommand:forge-vs.startTask",
+    "onCommand:forge-vs.previewRun",
+    "onCommand:forge-vs.resetTelemetryConsent"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -1232,6 +1720,18 @@ export function deactivate() {
       {
         "command": "forge-vs.submit",
         "title": "Forge AI: Submit for Evaluation"
+      },
+      {
+        "command": "forge-vs.startTask",
+        "title": "Forge AI: Start Task"
+      },
+      {
+        "command": "forge-vs.previewRun",
+        "title": "Forge AI: Preview Run (Local, Not Scored)"
+      },
+      {
+        "command": "forge-vs.resetTelemetryConsent",
+        "title": "Forge AI: Reset Telemetry Consent"
       },
       {
         "command": "forge-vs.showTicketView",
@@ -1243,6 +1743,11 @@ export function deactivate() {
         "command": "forge-vs.submit",
         "key": "ctrl+shift+e",
         "mac": "cmd+shift+e"
+      },
+      {
+        "command": "forge-vs.previewRun",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r"
       }
     ],
     "viewsContainers": {

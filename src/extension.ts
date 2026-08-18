@@ -1,9 +1,13 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { spawn } from 'child_process';
+import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 import { Task, TASKS, TASK_1 } from './data/taskData';
+import { TASK_FUNCTION_SIGNATURES } from './data/taskFunctionSignatures';
 import { TicketViewProvider } from './providers/TicketViewProvider';
+import { runLocalPreview, PreviewRunResult, TestResult } from './preview/localPreview';
 
 interface EvaluationResult {
     test_passed: boolean;
@@ -23,7 +27,9 @@ interface TelemetryData {
 
 let currentTaskId: string = 'task_1';
 let ticketProvider: TicketViewProvider | undefined;
+let ticketPanel: vscode.WebviewPanel | undefined;
 let previewRunInProgress = false;
+let extensionContext: vscode.ExtensionContext;
 const telemetrySessions: Record<string, TelemetryData> = {};
 
 export function getTaskSolutionFileName(taskId: string): string {
@@ -31,7 +37,9 @@ export function getTaskSolutionFileName(taskId: string): string {
 }
 
 export function buildStarterTaskFileContent(taskId: string): string {
-    return `# Starter file for ${taskId}\n\n\ndef solution():\n    """Implement the solution for ${taskId}."""\n    pass\n`;
+    const sig = TASK_FUNCTION_SIGNATURES[taskId];
+    const signatureLine = sig ? sig.signature : 'def solution():';
+    return `# Starter file for ${taskId}\n\n\n${signatureLine}\n    """Implement the solution for ${taskId}."""\n    pass\n`;
 }
 
 function getTelemetryConsent(context: vscode.ExtensionContext): boolean {
@@ -77,6 +85,34 @@ async function promptForTelemetryConsent(context: vscode.ExtensionContext): Prom
     return consent;
 }
 
+async function promptForCandidateIdentity(context: vscode.ExtensionContext): Promise<string | null> {
+    const identity = context.globalState.get<string>('forgeAI.candidateIdentity');
+    if (identity !== undefined) {
+        return identity;
+    }
+
+    const entered = await vscode.window.showInputBox({
+        prompt: 'Enter your name or email so your submissions can be identified',
+        placeHolder: 'name@example.com',
+    });
+
+    if (entered !== undefined) {
+        await context.globalState.update('forgeAI.candidateIdentity', entered || null);
+        return entered || null;
+    }
+
+    return null;
+}
+
+function getOrCreateParticipantId(context: vscode.ExtensionContext): string {
+    let id = context.globalState.get<string>('forgeAI.participantId');
+    if (!id) {
+        id = randomUUID();
+        context.globalState.update('forgeAI.participantId', id);
+    }
+    return id;
+}
+
 function trackSaveTelemetry(context: vscode.ExtensionContext): void {
     if (getTelemetryConsent(context) !== true) {
         return;
@@ -112,101 +148,178 @@ function hasSolutionFilePattern(fileName: string): boolean {
     return /_solution\.py$/i.test(fileName);
 }
 
-function parsePytestSummary(output: string): string {
-    const lines = output.split(/\r?\n/);
-    const summaryLine = [...lines].reverse().find((line) => /\d+\s+(passed|failed|error|skipped|xpassed|xfailed)/i.test(line));
-    if (summaryLine) {
-        return summaryLine.trim();
+function setCurrentTask(taskId: string) {
+    currentTaskId = taskId;
+    ticketProvider?.updateView(taskId);
+    if (ticketPanel && ticketPanel.webview) {
+        ticketPanel.webview.html = buildTicketPanelHtml(TASKS[taskId], taskId);
     }
-
-    return output.trim() || 'Preview run finished with no summary output.';
 }
 
-async function runPreviewForFile(context: vscode.ExtensionContext, filePath: string): Promise<void> {
-    if (!filePath) {
-        vscode.window.showErrorMessage('No Python file available for preview.');
-        return;
-    }
+function buildTicketPanelHtml(task: Task, taskId: string): string {
+    const criteriaHtml = task.acceptanceCriteria.map(criterion => `<li>${criterion}</li>`).join('');
+    const taskOptions = Object.entries(TASKS).map(([id, t]) => {
+        const selected = id === taskId ? 'selected' : '';
+        return `<option value="${id}" ${selected}>${t.id} - ${t.title.substring(0, 40)}${t.title.length > 40 ? '...' : ''}</option>`;
+    }).join('');
 
-    if (previewRunInProgress) {
-        return;
-    }
-
-    previewRunInProgress = true;
-
-    try {
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-        const command = 'python';
-        const args = ['-m', 'pytest', filePath, '-v'];
-
-        // TODO: VERIFY — confirm the exact local test file naming/location convention with the founder before this can run correctly; DO NOT invent a fake path.
-
-        const child = spawn(command, args, {
-            cwd: workspaceFolder?.uri.fsPath,
-            stdio: ['ignore', 'pipe', 'pipe'],
-        });
-
-        let output = '';
-        const timeoutMs = 10000;
-
-        child.stdout.on('data', (chunk) => {
-            output += chunk.toString();
-        });
-
-        child.stderr.on('data', (chunk) => {
-            output += chunk.toString();
-        });
-
-        const timeoutHandle = setTimeout(() => {
-            if (!child.killed) {
-                child.kill('SIGTERM');
+    return `<!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {
+                font-family: var(--vscode-font-family);
+                color: var(--vscode-foreground);
+                background-color: var(--vscode-editor-background);
+                padding: 16px;
+                line-height: 1.6;
             }
-            output += '\nPreview run timed out — check for an infinite loop.';
-        }, timeoutMs);
+            .dropdown-container {
+                margin-bottom: 16px;
+            }
+            .dropdown-container select {
+                width: 100%;
+                padding: 6px 8px;
+                background: var(--vscode-dropdown-background);
+                color: var(--vscode-dropdown-foreground);
+                border: 1px solid var(--vscode-dropdown-border);
+                border-radius: 4px;
+                font-size: 12px;
+                font-family: var(--vscode-font-family);
+                cursor: pointer;
+            }
+            .dropdown-container select:focus {
+                outline: 1px solid var(--vscode-focusBorder);
+            }
+            .ticket-id {
+                color: var(--vscode-textLink-foreground);
+                font-size: 11px;
+                text-transform: uppercase;
+                letter-spacing: 0.4px;
+                margin-bottom: 8px;
+            }
+            .ticket-title {
+                font-size: 20px;
+                font-weight: 700;
+                margin: 0 0 10px 0;
+            }
+            .ticket-meta {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                margin-bottom: 14px;
+                font-size: 12px;
+            }
+            .tag {
+                padding: 3px 10px;
+                border-radius: 999px;
+                background: var(--vscode-badge-background);
+                color: var(--vscode-badge-foreground);
+                font-size: 11px;
+            }
+            .section {
+                margin-top: 18px;
+            }
+            .section h3 {
+                margin: 0 0 8px 0;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            .content, .context-block {
+                font-size: 13px;
+                color: var(--vscode-descriptionForeground);
+                white-space: pre-wrap;
+            }
+            .context-block {
+                background: var(--vscode-editor-inactiveSelectionBackground);
+                padding: 12px;
+                border-radius: 6px;
+            }
+            ul {
+                padding-left: 18px;
+                margin: 0;
+            }
+            li {
+                margin-bottom: 6px;
+            }
+            .divider {
+                border: none;
+                border-top: 1px solid var(--vscode-panel-border);
+                margin: 14px 0;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="dropdown-container">
+            <select id="taskSelect">
+                ${taskOptions}
+            </select>
+        </div>
 
-        await new Promise<void>((resolve) => {
-            child.on('close', () => {
-                clearTimeout(timeoutHandle);
-                resolve();
+        <div class="ticket-id">${task.id}</div>
+        <div class="ticket-title">${task.title}</div>
+        <div class="ticket-meta">
+            <span class="tag">${task.priority}</span>
+            <span class="tag">${task.skill}</span>
+            <span class="tag">${task.ticketType}</span>
+            <span class="tag">${task.company}</span>
+        </div>
+
+        <hr class="divider" />
+
+        <div class="section">
+            <h3>Context</h3>
+            <div class="context-block">${task.context}</div>
+        </div>
+
+        <div class="section">
+            <h3>Description</h3>
+            <div class="content">${task.description}</div>
+        </div>
+
+        <div class="section">
+            <h3>Acceptance Criteria</h3>
+            <ul>${criteriaHtml}</ul>
+        </div>
+
+        <script>
+            const vscode = acquireVsCodeApi();
+            const select = document.getElementById('taskSelect');
+            select.addEventListener('change', () => {
+                vscode.postMessage({
+                    type: 'taskSelected',
+                    taskId: select.value
+                });
             });
-            child.on('error', () => {
-                clearTimeout(timeoutHandle);
-                output += '\nPreview run failed to start. Ensure Python is installed and available on PATH.';
-                resolve();
-            });
-        });
-
-        const summary = parsePytestSummary(output);
-        const failed = /\d+\s+failed/i.test(summary) || /FAILURES|ERRORS/i.test(output) || /Preview run timed out/i.test(output);
-        const passed = /\d+\s+passed/i.test(summary) && !failed;
-        const feedback = output.trim() || summary;
-
-        showPreviewResultsPanel({
-            test_passed: passed,
-            ai_score: passed ? 100 : 0,
-            ai_feedback: feedback,
-            exec_error: failed ? summary : null,
-            error: failed ? summary : null,
-            logs: output.split(/\r?\n/),
-        });
-
-        trackPreviewTelemetry(context);
-    } catch (error: any) {
-        showPreviewResultsPanel({
-            test_passed: false,
-            ai_score: 0,
-            ai_feedback: error?.message || 'Preview run failed.',
-            exec_error: error?.message || 'Preview run failed.',
-            error: error?.message || 'Preview run failed.',
-            logs: [error?.message || 'Preview run failed.'],
-        });
-        trackPreviewTelemetry(context);
-    } finally {
-        previewRunInProgress = false;
-    }
+        </script>
+    </body>
+    </html>`;
 }
 
-function showPreviewResultsPanel(result: EvaluationResult) {
+function formatFeedbackHtml(feedback: string): string {
+    let html = feedback;
+
+    // Convert markdown-style bullet points to HTML lists
+    const bulletRegex = /^- (.+)$/gm;
+    html = html.replace(bulletRegex, '<li>$1</li>');
+
+    // Wrap consecutive list items in <ul>
+    const ulRegex = /(<li>.+<\/li>)/s;
+    if (ulRegex.test(html)) {
+        html = html.replace(/(<li>.+<\/li>)/s, (match) => `<ul>${match}</ul>`);
+    }
+
+    // Convert markdown headers to HTML
+    html = html.replace(/^### (.+)$/gm, '<h4 style="margin-top: 10px;">$1</h4>');
+    html = html.replace(/^## (.+)$/gm, '<h3 style="margin-top: 10px;">$1</h3>');
+
+    // Preserve line breaks
+    html = html.replace(/\n/g, '<br>');
+
+    return html;
+}
+
+function showPreviewResultsPanel(result: PreviewRunResult) {
     const panel = vscode.window.createWebviewPanel(
         'forgePreviewResults',
         'Local Preview Results',
@@ -215,7 +328,14 @@ function showPreviewResultsPanel(result: EvaluationResult) {
     );
 
     const passed = result.test_passed ? 'passed' : 'failed';
-    const feedback = (result.ai_feedback || 'No local preview output').replace(/\n/g, '<br>');
+    const testChecklistHtml = result.testResults && result.testResults.length > 0
+        ? result.testResults.map((t) => {
+            const icon = t.status === 'PASSED' ? '✅' : '❌';
+            return `<div style="padding: 6px 0; font-size: 13px;">${icon} ${t.name}</div>`;
+        }).join('')
+        : '';
+    const rawOutput = (result.logs || []).join('<br>');
+
     panel.webview.html = `
         <!DOCTYPE html>
         <html>
@@ -262,6 +382,12 @@ function showPreviewResultsPanel(result: EvaluationResult) {
                     letter-spacing: 0.5px;
                     margin-bottom: 8px;
                 }
+                .test-checklist {
+                    background: #2d2d2d;
+                    padding: 12px;
+                    border-radius: 6px;
+                    margin-bottom: 12px;
+                }
                 .feedback {
                     background: #2d2d2d;
                     padding: 16px;
@@ -284,9 +410,16 @@ function showPreviewResultsPanel(result: EvaluationResult) {
             <div class="score ${passed}">${result.ai_score || 0}/100</div>
             <div class="status">${result.test_passed ? '✅ PASSED' : '❌ FAILED'}</div>
 
+            ${testChecklistHtml ? `
+                <div class="section">
+                    <div class="section-title">Test Results</div>
+                    <div class="test-checklist">${testChecklistHtml}</div>
+                </div>
+            ` : ''}
+
             <div class="section">
                 <div class="section-title">Pytest Output</div>
-                <div class="feedback">${feedback}</div>
+                <div class="feedback">${rawOutput || result.ai_feedback || 'No output'}</div>
             </div>
 
             ${result.exec_error ? `
@@ -300,7 +433,7 @@ function showPreviewResultsPanel(result: EvaluationResult) {
     `;
 }
 
-function showResultsPanel(result: EvaluationResult) {
+function showResultsPanel(result: EvaluationResult, task: Task) {
     const panel = vscode.window.createWebviewPanel(
         'forgeResults',
         'Forge AI Results',
@@ -309,8 +442,10 @@ function showResultsPanel(result: EvaluationResult) {
     );
 
     const passed = result.test_passed ? 'passed' : 'failed';
-    const feedback = (result.ai_feedback || 'No feedback').replace(/\n/g, '<br>');
+    const criteriaHtml = task.acceptanceCriteria.map(criterion => `<li>${criterion}</li>`).join('');
+    const formattedFeedback = formatFeedbackHtml(result.ai_feedback || 'No feedback');
 
+    // BACKEND TODO: ai_score granularity/accuracy is backend-controlled — not fixable from the extension.
     panel.webview.html = `
         <!DOCTYPE html>
         <html>
@@ -348,7 +483,7 @@ function showResultsPanel(result: EvaluationResult) {
                     letter-spacing: 0.5px;
                     margin-bottom: 8px;
                 }
-                .feedback {
+                .feedback, .content {
                     background: #2d2d2d;
                     padding: 16px;
                     border-radius: 6px;
@@ -363,6 +498,16 @@ function showResultsPanel(result: EvaluationResult) {
                     margin-top: 12px;
                     border: 1px solid #f44336;
                 }
+                ul {
+                    padding-left: 20px;
+                    margin: 0;
+                }
+                li {
+                    margin-bottom: 6px;
+                }
+                h4 {
+                    margin: 12px 0 6px 0;
+                }
             </style>
         </head>
         <body>
@@ -370,9 +515,21 @@ function showResultsPanel(result: EvaluationResult) {
             <div class="status">${result.test_passed ? '✅ PASSED' : '❌ FAILED'}</div>
 
             <div class="section">
-                <div class="section-title">Feedback</div>
-                <div class="feedback">${feedback}</div>
+                <div class="section-title">Acceptance Criteria</div>
+                <ul>${criteriaHtml}</ul>
             </div>
+
+            <div class="section">
+                <div class="section-title">Feedback</div>
+                <div class="feedback">${formattedFeedback}</div>
+            </div>
+
+            ${result.logs && result.logs.length > 0 ? `
+                <div class="section">
+                    <div class="section-title">Execution Logs</div>
+                    <div class="content">${result.logs.join('<br>')}</div>
+                </div>
+            ` : ''}
 
             ${result.exec_error ? `
                 <div class="section">
@@ -380,120 +537,54 @@ function showResultsPanel(result: EvaluationResult) {
                     <div class="error">${result.exec_error}</div>
                 </div>
             ` : ''}
+
+            ${result.error ? `
+                <div class="section">
+                    <div class="section-title">System Error</div>
+                    <div class="error">${result.error}</div>
+                </div>
+            ` : ''}
         </body>
         </html>
     `;
 }
 
-function showTicketPanel(task: Task) {
-    const panel = vscode.window.createWebviewPanel(
-        'forgeTicket',
-        'Forge AI Ticket',
-        vscode.ViewColumn.One,
-        { enableScripts: true }
-    );
+async function showOrUpdateTicketPanel() {
+    const task = TASKS[currentTaskId];
 
-    const criteriaHtml = task.acceptanceCriteria.map(criterion => `<li>${criterion}</li>`).join('');
-
-    panel.webview.html = `<!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                body {
-                    font-family: var(--vscode-font-family);
-                    color: var(--vscode-foreground);
-                    background-color: var(--vscode-editor-background);
-                    padding: 16px;
-                    line-height: 1.6;
-                }
-                .ticket-id {
-                    color: var(--vscode-textLink-foreground);
-                    font-size: 11px;
-                    text-transform: uppercase;
-                    letter-spacing: 0.4px;
-                    margin-bottom: 8px;
-                }
-                .ticket-title {
-                    font-size: 20px;
-                    font-weight: 700;
-                    margin: 0 0 10px 0;
-                }
-                .ticket-meta {
-                    display: flex;
-                    flex-wrap: wrap;
-                    gap: 8px;
-                    margin-bottom: 14px;
-                    font-size: 12px;
-                }
-                .tag {
-                    padding: 3px 10px;
-                    border-radius: 999px;
-                    background: var(--vscode-badge-background);
-                    color: var(--vscode-badge-foreground);
-                    font-size: 11px;
-                }
-                .section {
-                    margin-top: 18px;
-                }
-                .section h3 {
-                    margin: 0 0 8px 0;
-                    font-size: 13px;
-                    font-weight: 700;
-                }
-                .content, .context-block {
-                    font-size: 13px;
-                    color: var(--vscode-descriptionForeground);
-                    white-space: pre-wrap;
-                }
-                .context-block {
-                    background: var(--vscode-editor-inactiveSelectionBackground);
-                    padding: 12px;
-                    border-radius: 6px;
-                }
-                ul {
-                    padding-left: 18px;
-                    margin: 0;
-                }
-                li {
-                    margin-bottom: 6px;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="ticket-id">${task.id}</div>
-            <div class="ticket-title">${task.title}</div>
-            <div class="ticket-meta">
-                <span class="tag">${task.priority}</span>
-                <span class="tag">${task.skill}</span>
-                <span class="tag">${task.ticketType}</span>
-                <span class="tag">${task.company}</span>
-                <span class="tag">Reported by ${task.reporter}</span>
-            </div>
-            <div class="section">
-                <h3>Context</h3>
-                <div class="context-block">${task.context}</div>
-            </div>
-            <div class="section">
-                <h3>Description</h3>
-                <div class="content">${task.description}</div>
-            </div>
-            <div class="section">
-                <h3>Acceptance Criteria</h3>
-                <ul>${criteriaHtml}</ul>
-            </div>
-        </body>
-        </html>`;
+    if (ticketPanel && !ticketPanel.active) {
+        ticketPanel.webview.html = buildTicketPanelHtml(task, currentTaskId);
+        ticketPanel.reveal();
+    } else if (!ticketPanel) {
+        ticketPanel = vscode.window.createWebviewPanel(
+            'forgeTicket',
+            'Forge AI Ticket',
+            vscode.ViewColumn.One,
+            { enableScripts: true }
+        );
+        ticketPanel.webview.html = buildTicketPanelHtml(task, currentTaskId);
+        ticketPanel.onDidDispose(() => {
+            ticketPanel = undefined;
+        });
+        ticketPanel.webview.onDidReceiveMessage((message) => {
+            if (message.type === 'taskSelected') {
+                setCurrentTask(message.taskId);
+                void showOrUpdateTicketPanel();
+            }
+        });
+    }
 }
 
 export async function activate(context: vscode.ExtensionContext) {
+    extensionContext = context;
     console.log('🚀 Forge AI extension is now active!');
 
     await promptForTelemetryConsent(context);
+    await promptForCandidateIdentity(context);
+    getOrCreateParticipantId(context);
 
     ticketProvider = new TicketViewProvider(context, (taskId: string) => {
-        currentTaskId = taskId;
-        console.log(`📌 Task changed to: ${taskId}`);
-        vscode.window.showInformationMessage(`📋 Switched to ${TASKS[taskId].id}: ${TASKS[taskId].title}`);
+        setCurrentTask(taskId);
     });
 
     const registration = vscode.window.registerWebviewViewProvider(
@@ -508,11 +599,11 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(registration);
     console.log('✅ Ticket view provider registered with options');
 
-    showTicketPanel(TASK_1);
+    await showOrUpdateTicketPanel();
 
     context.subscriptions.push(
-        vscode.commands.registerCommand('forge-vs.showTicketView', () => {
-            showTicketPanel(TASKS[currentTaskId]);
+        vscode.commands.registerCommand('forge-vs.showTicketView', async () => {
+            await showOrUpdateTicketPanel();
         })
     );
 
@@ -542,13 +633,28 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('forge-vs.previewRun', async () => {
             const editor = vscode.window.activeTextEditor;
-            const filePath = editor?.document.fileName || vscode.window.activeTextEditor?.document.fileName;
+            const filePath = editor?.document.fileName;
             if (!filePath) {
                 vscode.window.showErrorMessage('No file open. Open a Python file first.');
                 return;
             }
 
-            await runPreviewForFile(context, filePath);
+            if (previewRunInProgress) {
+                vscode.window.showWarningMessage('Preview run already in progress...');
+                return;
+            }
+
+            previewRunInProgress = true;
+
+            try {
+                const result = await runLocalPreview(currentTaskId, filePath, 10000);
+                showPreviewResultsPanel(result);
+                trackPreviewTelemetry(context);
+            } catch (error: any) {
+                vscode.window.showErrorMessage(`Preview run failed: ${error?.message}`);
+            } finally {
+                previewRunInProgress = false;
+            }
         })
     );
 
@@ -556,6 +662,13 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('forge-vs.resetTelemetryConsent', async () => {
             await context.globalState.update('forgeAI.telemetryConsent', undefined);
             await promptForTelemetryConsent(context);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.resetCandidateIdentity', async () => {
+            await context.globalState.update('forgeAI.candidateIdentity', undefined);
+            await promptForCandidateIdentity(context);
         })
     );
 
@@ -589,6 +702,7 @@ export async function activate(context: vscode.ExtensionContext) {
                         console.log(`🌐 API URL: ${apiUrl}`);
 
                         // BACKEND TODO: /evaluate endpoint must accept an optional 'telemetry' field in the request body and store it — not yet implemented server-side as of this extension build.
+                        // BACKEND TODO: /evaluate endpoint must accept and store 'participant_id' and 'candidate_identity' — not yet implemented server-side.
                         const response = await fetch(`${apiUrl}/evaluate`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
@@ -597,6 +711,8 @@ export async function activate(context: vscode.ExtensionContext) {
                                 task_id: currentTaskId,
                                 ticket_context: '',
                                 telemetry: telemetryAllowed ? session : null,
+                                participant_id: getOrCreateParticipantId(context),
+                                candidate_identity: context.globalState.get('forgeAI.candidateIdentity') ?? null,
                             }),
                         });
 
@@ -612,7 +728,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             `Forge AI: ${passedText} (Score: ${result.ai_score}/100)`
                         );
 
-                        showResultsPanel(result);
+                        showResultsPanel(result, TASKS[currentTaskId]);
                     } catch (error: any) {
                         vscode.window.showErrorMessage(`Failed to submit: ${error.message}`);
                         console.error('❌ Submit error:', error);
@@ -632,13 +748,17 @@ export async function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
+            trackSaveTelemetry(context);
+
             if (getTelemetryConsent(context) !== true) {
                 return;
             }
 
-            const session = getOrCreateTelemetrySession(currentTaskId);
-            session.total_save_count += 1;
-            void runPreviewForFile(context, document.fileName);
+            void (async () => {
+                const result = await runLocalPreview(currentTaskId, document.fileName, 10000);
+                showPreviewResultsPanel(result);
+                trackPreviewTelemetry(context);
+            })();
         })
     );
 }

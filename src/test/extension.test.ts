@@ -12,7 +12,7 @@ suite('Extension Test Suite', () => {
 	test('starter file content includes the ticket id and a minimal stub', () => {
 		const fileContent = buildStarterTaskFileContent('task_3');
 		assert.match(fileContent, /task_3/);
-		assert.match(fileContent, /def .*\(\)\s*:/);
+		assert.match(fileContent, /def apply_metadata_filter/);
 		assert.match(fileContent, /pass/);
 	});
 });
