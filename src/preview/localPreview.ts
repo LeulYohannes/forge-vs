@@ -20,10 +20,16 @@ export interface PreviewRunResult {
     testResults?: TestResult[];
 }
 
-function buildPreviewTestFileContent(taskId: string, candidateFilePath: string): string {
+function buildPreviewTestFileContent(taskId: string, candidateFilePath: string): string | null {
     const sig = TASK_FUNCTION_SIGNATURES[taskId];
     const functionName = sig?.functionName || 'solution';
-    const testBody = PREVIEW_TEST_BODIES[taskId] || '';
+    const testBody = PREVIEW_TEST_BODIES[taskId];
+
+    // Company-assigned tickets don't have local preview test bodies.
+    // The test suite is server-side only to prevent cheating.
+    if (!testBody) {
+        return null;
+    }
 
     // Normalize the path for Python
     const normalizedPath = candidateFilePath.replace(/\\/g, '\\\\');
@@ -49,6 +55,7 @@ def get_fn():
 
     return header + testBody;
 }
+
 
 function parseTestOutput(output: string): TestResult[] {
     const results: TestResult[] = [];
@@ -83,6 +90,21 @@ export async function runLocalPreview(
     timeoutMs: number = 10000
 ): Promise<PreviewRunResult> {
     const testFileContent = buildPreviewTestFileContent(taskId, candidateFilePath);
+
+    // Company-assigned tickets have server-side test suites only.
+    // Local preview is only available for the 5 static demo tasks.
+    if (testFileContent === null) {
+        return {
+            test_passed: false,
+            ai_score: 0,
+            ai_feedback: 'Local preview is not available for company-assigned tickets. The test suite is kept server-side to maintain assessment integrity. When you\'re ready, use the Submit command to run the official evaluation.',
+            exec_error: null,
+            error: null,
+            logs: ['Local preview not available for company-assigned tickets.'],
+            testResults: [],
+        };
+    }
+
     const tempDir = os.tmpdir();
     const tempTestFilePath = path.join(tempDir, `forge-preview-${taskId}-${Date.now()}.py`);
 

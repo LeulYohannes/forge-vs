@@ -6,8 +6,9 @@ import { randomUUID } from 'crypto';
 import * as vscode from 'vscode';
 import { Task, TASKS, TASK_1 } from './data/taskData';
 import { TASK_FUNCTION_SIGNATURES } from './data/taskFunctionSignatures';
-import { TicketViewProvider } from './providers/TicketViewProvider';
+import { TicketViewProvider, escapeHtml } from './providers/TicketViewProvider';
 import { runLocalPreview, PreviewRunResult, TestResult } from './preview/localPreview';
+import { AssignedTicket, fetchAssignment } from './api/assignments';
 
 interface EvaluationResult {
     test_passed: boolean;
@@ -25,6 +26,9 @@ interface TelemetryData {
     session_start_timestamp: number;
 }
 
+let isAssignmentMode: boolean = false;
+let currentAssignedTicket: AssignedTicket | null = null;
+let assignmentErrorMessage: string | null = null;
 let currentTaskId: string = 'task_1';
 let ticketProvider: TicketViewProvider | undefined;
 let ticketPanel: vscode.WebviewPanel | undefined;
@@ -36,7 +40,13 @@ export function getTaskSolutionFileName(taskId: string): string {
     return `${taskId}_solution.py`;
 }
 
-export function buildStarterTaskFileContent(taskId: string): string {
+export function buildStarterTaskFileContent(taskId: string, assignedTicket?: AssignedTicket | null): string {
+    const activeTicket = assignedTicket || (isAssignmentMode && currentAssignedTicket && currentAssignedTicket.task_id === taskId ? currentAssignedTicket : null);
+    if (activeTicket) {
+        const signatureLine = activeTicket.function_signature || 'def solution():';
+        return `# Starter file for ${taskId}\n\n\n${signatureLine}\n    """Implement the solution for ${taskId}."""\n    pass\n`;
+    }
+
     const sig = TASK_FUNCTION_SIGNATURES[taskId];
     const signatureLine = sig ? sig.signature : 'def solution():';
     return `# Starter file for ${taskId}\n\n\n${signatureLine}\n    """Implement the solution for ${taskId}."""\n    pass\n`;
@@ -150,13 +160,80 @@ function hasSolutionFilePattern(fileName: string): boolean {
 
 function setCurrentTask(taskId: string) {
     currentTaskId = taskId;
-    ticketProvider?.updateView(taskId);
-    if (ticketPanel && ticketPanel.webview) {
-        ticketPanel.webview.html = buildTicketPanelHtml(TASKS[taskId], taskId);
+    if (isAssignmentMode && currentAssignedTicket) {
+        ticketProvider?.setAssignmentMode(currentAssignedTicket);
+        if (ticketPanel && ticketPanel.webview) {
+            ticketPanel.webview.html = buildAssignmentPanelHtml(currentAssignedTicket);
+        }
+    } else if (isAssignmentMode && assignmentErrorMessage) {
+        ticketProvider?.setAssignmentError(assignmentErrorMessage);
+        if (ticketPanel && ticketPanel.webview) {
+            ticketPanel.webview.html = TicketViewProvider.getHtmlForError(assignmentErrorMessage);
+        }
+    } else {
+        ticketProvider?.setDemoMode(taskId);
+        if (ticketPanel && ticketPanel.webview) {
+            const task = TASKS[taskId] || TASK_1;
+            ticketPanel.webview.html = buildTicketPanelHtml(task, taskId);
+        }
     }
 }
 
-function buildTicketPanelHtml(task: Task, taskId: string): string {
+export function buildAssignmentPanelHtml(ticket: AssignedTicket): string {
+    const escapedCompanyName = escapeHtml(ticket.company_name);
+    const escapedSignature = escapeHtml(ticket.function_signature);
+
+    return `<!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body {
+                font-family: var(--vscode-font-family);
+                color: var(--vscode-foreground);
+                background-color: var(--vscode-editor-background);
+                padding: 24px;
+                line-height: 1.6;
+            }
+            .company-tag {
+                display: inline-block;
+                padding: 4px 12px;
+                border-radius: 4px;
+                background-color: var(--vscode-badge-background);
+                color: var(--vscode-badge-foreground);
+                font-size: 13px;
+                font-weight: 500;
+                margin-bottom: 20px;
+            }
+            .instruction {
+                font-size: 15px;
+                font-weight: 500;
+                margin-bottom: 16px;
+                color: var(--vscode-foreground);
+            }
+            .signature-block {
+                background-color: var(--vscode-editor-inactiveSelectionBackground);
+                padding: 16px;
+                border-radius: 6px;
+                border-left: 4px solid var(--vscode-textLink-foreground);
+                font-family: var(--vscode-editor-font-family);
+                font-size: 13px;
+                color: var(--vscode-foreground);
+                white-space: pre-wrap;
+                word-break: break-all;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="company-tag">You're being assessed by ${escapedCompanyName}</div>
+        <div class="instruction">Implement the function below. Submit when ready.</div>
+        <div class="signature-block"><code>${escapedSignature}</code></div>
+    </body>
+    </html>`;
+}
+
+export function buildTicketPanelHtml(task: Task, taskId: string): string {
     const criteriaHtml = task.acceptanceCriteria.map(criterion => `<li>${criterion}</li>`).join('');
     const taskOptions = Object.entries(TASKS).map(([id, t]) => {
         const selected = id === taskId ? 'selected' : '';
@@ -550,7 +627,32 @@ function showResultsPanel(result: EvaluationResult, task: Task) {
 }
 
 async function showOrUpdateTicketPanel() {
-    const task = TASKS[currentTaskId];
+    if (isAssignmentMode) {
+        const assignmentHtml = currentAssignedTicket
+            ? buildAssignmentPanelHtml(currentAssignedTicket)
+            : TicketViewProvider.getHtmlForError(assignmentErrorMessage || 'Could not load your assigned ticket.');
+
+        if (ticketPanel && !ticketPanel.active) {
+            ticketPanel.webview.html = assignmentHtml;
+            ticketPanel.reveal();
+        } else if (!ticketPanel) {
+            ticketPanel = vscode.window.createWebviewPanel(
+                'forgeTicket',
+                'Forge AI Assignment',
+                vscode.ViewColumn.One,
+                { enableScripts: true }
+            );
+            ticketPanel.webview.html = assignmentHtml;
+            ticketPanel.onDidDispose(() => {
+                ticketPanel = undefined;
+            });
+        } else {
+            ticketPanel.webview.html = assignmentHtml;
+        }
+        return;
+    }
+
+    const task = TASKS[currentTaskId] || TASK_1;
 
     if (ticketPanel && !ticketPanel.active) {
         ticketPanel.webview.html = buildTicketPanelHtml(task, currentTaskId);
@@ -567,12 +669,21 @@ async function showOrUpdateTicketPanel() {
             ticketPanel = undefined;
         });
         ticketPanel.webview.onDidReceiveMessage((message) => {
-            if (message.type === 'taskSelected') {
+            if (message.type === 'taskSelected' && !isAssignmentMode) {
                 setCurrentTask(message.taskId);
                 void showOrUpdateTicketPanel();
             }
         });
+    } else {
+        ticketPanel.webview.html = buildTicketPanelHtml(task, currentTaskId);
     }
+}
+
+function getApiUrl(): string {
+    const config = vscode.workspace.getConfiguration('forgeAI');
+    return process.env.FORGE_API_URL ||
+        config.get('apiUrl') as string ||
+        'https://forge-ai-core.onrender.com';
 }
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -599,7 +710,80 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(registration);
     console.log('✅ Ticket view provider registered with options');
 
+    // Check if an assignment token is stored
+    const storedAssignmentToken = context.globalState.get<string>('forgeAI.assignmentToken');
+    if (storedAssignmentToken) {
+        isAssignmentMode = true;
+        const apiUrl = getApiUrl();
+        const ticket = await fetchAssignment(storedAssignmentToken, apiUrl);
+        if (ticket) {
+            currentAssignedTicket = ticket;
+            assignmentErrorMessage = null;
+            currentTaskId = ticket.task_id;
+            ticketProvider.setAssignmentMode(ticket);
+        } else {
+            // If token fetch failed, stay in Assignment Mode with an error state (do NOT silently fall back to Demo Mode)
+            currentAssignedTicket = null;
+            assignmentErrorMessage = `Could not load assignment for token "${storedAssignmentToken}". Please verify your token or connection.`;
+            ticketProvider.setAssignmentError(assignmentErrorMessage);
+        }
+    } else {
+        // Demo Mode
+        isAssignmentMode = false;
+        currentAssignedTicket = null;
+        assignmentErrorMessage = null;
+        currentTaskId = 'task_1';
+        ticketProvider.setDemoMode(currentTaskId);
+    }
+
     await showOrUpdateTicketPanel();
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.enterAssignmentCode', async () => {
+            const entered = await vscode.window.showInputBox({
+                prompt: 'Enter your assignment code / token provided by your company',
+                placeHolder: 'e.g. asgt_xyz123',
+                ignoreFocusOut: true,
+            });
+
+            if (entered === undefined) {
+                return; // User cancelled
+            }
+
+            const trimmed = entered.trim();
+            if (!trimmed) {
+                // Explicitly clear assignment token and switch back to Demo Mode
+                await context.globalState.update('forgeAI.assignmentToken', undefined);
+                isAssignmentMode = false;
+                currentAssignedTicket = null;
+                assignmentErrorMessage = null;
+                currentTaskId = 'task_1';
+                ticketProvider?.setDemoMode(currentTaskId);
+                await showOrUpdateTicketPanel();
+                vscode.window.showInformationMessage('Assignment code cleared. Switched to Demo Mode.');
+                return;
+            }
+
+            await context.globalState.update('forgeAI.assignmentToken', trimmed);
+            isAssignmentMode = true;
+            const apiUrl = getApiUrl();
+            const ticket = await fetchAssignment(trimmed, apiUrl);
+
+            if (ticket) {
+                currentAssignedTicket = ticket;
+                assignmentErrorMessage = null;
+                currentTaskId = ticket.task_id;
+                ticketProvider?.setAssignmentMode(ticket);
+                await showOrUpdateTicketPanel();
+                vscode.window.showInformationMessage(`Loaded assignment for ${ticket.company_name}.`);
+            } else {
+                currentAssignedTicket = null;
+                assignmentErrorMessage = `Could not load assignment for token "${trimmed}". Please verify your token or connection.`;
+                ticketProvider?.setAssignmentError(assignmentErrorMessage);
+                await showOrUpdateTicketPanel();
+            }
+        })
+    );
 
     context.subscriptions.push(
         vscode.commands.registerCommand('forge-vs.showTicketView', async () => {
@@ -620,7 +804,7 @@ export async function activate(context: vscode.ExtensionContext) {
             const fileUri = vscode.Uri.file(filePath);
 
             if (!fs.existsSync(filePath)) {
-                await vscode.workspace.fs.writeFile(fileUri, Buffer.from(buildStarterTaskFileContent(currentTaskId)));
+                await vscode.workspace.fs.writeFile(fileUri, Buffer.from(buildStarterTaskFileContent(currentTaskId, currentAssignedTicket)));
             }
 
             const document = await vscode.workspace.openTextDocument(filePath);
@@ -686,34 +870,42 @@ export async function activate(context: vscode.ExtensionContext) {
             const fileName = editor.document.fileName.split('/').pop() || 'unknown.py';
             const telemetryAllowed = getTelemetryConsent(context);
             const session = telemetryAllowed ? updateFirstSubmitTime(context) : null;
+            const assignmentToken = context.globalState.get<string>('forgeAI.assignmentToken');
+
+            const submissionTitle = isAssignmentMode && currentAssignedTicket
+                ? `Submitting ${fileName} for ${currentAssignedTicket.company_name}...`
+                : `Submitting ${fileName} for ${TASKS[currentTaskId]?.id || currentTaskId}...`;
 
             await vscode.window.withProgress(
                 {
                     location: vscode.ProgressLocation.Notification,
-                    title: `Submitting ${fileName} for ${TASKS[currentTaskId]?.id || currentTaskId}...`,
+                    title: submissionTitle,
                     cancellable: false,
                 },
                 async () => {
                     try {
-                        const config = vscode.workspace.getConfiguration('forgeAI');
-                        const apiUrl = process.env.FORGE_API_URL ||
-                            config.get('apiUrl') as string ||
-                            'https://forge-ai-core.onrender.com';
+                        const apiUrl = getApiUrl();
                         console.log(`🌐 API URL: ${apiUrl}`);
 
-                        // BACKEND TODO: /evaluate endpoint must accept an optional 'telemetry' field in the request body and store it — not yet implemented server-side as of this extension build.
-                        // BACKEND TODO: /evaluate endpoint must accept and store 'participant_id' and 'candidate_identity' — not yet implemented server-side.
+                        // BACKEND TODO: The /evaluate endpoint must accept and store 'assignment_token' and 'company_name' (in addition to 'telemetry', 'participant_id', and 'candidate_identity') — unbuilt backend work in forge-ai-core.
+                        const requestBody: Record<string, any> = {
+                            code: code,
+                            task_id: currentTaskId,
+                            ticket_context: '',
+                            telemetry: telemetryAllowed ? session : null,
+                            participant_id: getOrCreateParticipantId(context),
+                            candidate_identity: context.globalState.get('forgeAI.candidateIdentity') ?? null,
+                        };
+
+                        if (isAssignmentMode && assignmentToken) {
+                            requestBody.assignment_token = assignmentToken;
+                            requestBody.company_name = currentAssignedTicket?.company_name ?? null;
+                        }
+
                         const response = await fetch(`${apiUrl}/evaluate`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                code: code,
-                                task_id: currentTaskId,
-                                ticket_context: '',
-                                telemetry: telemetryAllowed ? session : null,
-                                participant_id: getOrCreateParticipantId(context),
-                                candidate_identity: context.globalState.get('forgeAI.candidateIdentity') ?? null,
-                            }),
+                            body: JSON.stringify(requestBody),
                         });
 
                         if (!response.ok) {
@@ -723,15 +915,24 @@ export async function activate(context: vscode.ExtensionContext) {
 
                         const result = await response.json() as EvaluationResult;
 
-                        const passedText = result.test_passed ? '✅ PASSED' : '❌ FAILED';
-                        vscode.window.showInformationMessage(
-                            `Forge AI: ${passedText} (Score: ${result.ai_score}/100)`
-                        );
-
-                        showResultsPanel(result, TASKS[currentTaskId]);
+                        if (isAssignmentMode) {
+                            // Section A.5: In Assignment Mode, candidate output is gutted.
+                            // Only show generic confirmation message. Do NOT display score, pass/fail, or feedback.
+                            // Do not log scoring or feedback to console.
+                            console.log(`📤 Submission received for task: ${currentTaskId}`);
+                            vscode.window.showInformationMessage('Your submission has been received.');
+                        } else {
+                            // Demo Mode: existing full feedback behavior
+                            const passedText = result.test_passed ? '✅ PASSED' : '❌ FAILED';
+                            vscode.window.showInformationMessage(
+                                `Forge AI: ${passedText} (Score: ${result.ai_score}/100)`
+                            );
+                            const task = TASKS[currentTaskId] || TASK_1;
+                            showResultsPanel(result, task);
+                        }
                     } catch (error: any) {
                         vscode.window.showErrorMessage(`Failed to submit: ${error.message}`);
-                        console.error('❌ Submit error:', error);
+                        console.error('❌ Submit error:', error?.message || error);
                     }
                 }
             );

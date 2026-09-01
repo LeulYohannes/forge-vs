@@ -12,3 +12,10 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 **/.vscode-test.*
+reference/**
+scripts/**
+test_workspace/**
+repomix-output.xml
+COPILOT_BUILD_INSTRUCTIONS.md
+COPILOT_FIX_INSTRUCTIONS.md
+*.log

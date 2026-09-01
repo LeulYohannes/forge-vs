@@ -42,17 +42,24 @@ The content is organized as follows:
 <directory_structure>
 src/
   data/
+    previewTestCases.ts
     taskData.ts
+    taskFunctionSignatures.ts
+  preview/
+    localPreview.ts
   providers/
     TicketViewProvider.ts
   test/
     extension.test.ts
   extension.ts
+test_workspace/
+  task_1_wrong_function_name.py
 .gitignore
 .vscode-test.mjs
 .vscodeignore
 CHANGELOG.md
 COPILOT_BUILD_INSTRUCTIONS.md
+COPILOT_FIX_INSTRUCTIONS.md
 esbuild.js
 eslint.config.mjs
 package.json
@@ -63,6 +70,292 @@ vsc-extension-quickstart.md
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="src/data/previewTestCases.ts">
+export const PREVIEW_TEST_BODIES: Record<string, string> = {
+    task_1: `
+def test_splits_by_function_definitions():
+    fn = get_fn()
+    source_code = "\\ndef greet(name):\\n    return f\\"Hello, {name}\\"\\n\\ndef farewell(name):\\n    return f\\"Goodbye, {name}\\"\\n"
+    result = fn(source_code)
+    assert len(result) == 2
+    assert "def greet" in result[0]
+    assert "def farewell" in result[1]
+
+def test_invalid_syntax_returns_empty_list():
+    fn = get_fn()
+    result = fn("def broken(:\\n    this is not valid python")
+    assert result == []
+`,
+    task_2: `
+def test_alpha_blends_sparse_and_dense_scores():
+    fn = get_fn()
+    sparse = {"doc_A": 0.9, "doc_B": 0.3}
+    dense = {"doc_A": 0.2, "doc_B": 0.8}
+    result = dict(fn(sparse, dense, alpha=0.5))
+    assert abs(result["doc_A"] - 0.55) < 1e-6
+    assert abs(result["doc_B"] - 0.55) < 1e-6
+
+def test_alpha_zero_uses_only_sparse_scores():
+    fn = get_fn()
+    sparse = {"doc_A": 0.9, "doc_B": 0.3}
+    dense = {"doc_A": 0.2, "doc_B": 0.8}
+    result = dict(fn(sparse, dense, alpha=0.0))
+    assert abs(result["doc_A"] - 0.9) < 1e-6
+    assert abs(result["doc_B"] - 0.3) < 1e-6
+`,
+    task_3: `
+def test_multiple_conditions_use_and_logic():
+    fn = get_fn()
+    documents = [
+        {"id": "1", "status": "active", "score": 0.95, "created_at": "2024-06-01"},
+        {"id": "2", "status": "active", "score": 0.42, "created_at": "2024-06-01"},
+        {"id": "3", "status": "deprecated", "score": 0.88, "created_at": "2024-06-01"},
+    ]
+    conditions = {"min_score": 0.80, "status": "active"}
+    result = fn(documents, conditions)
+    assert [d["id"] for d in result] == ["1"]
+
+def test_empty_conditions_returns_all_documents():
+    fn = get_fn()
+    documents = [{"id": "1", "status": "active", "score": 0.5, "created_at": "2024-06-01"}]
+    result = fn(documents, {})
+    assert len(result) == 1
+`,
+    task_4: `
+def test_returns_top_k_documents_sorted_by_score():
+    fn = get_fn()
+    documents = [
+        {"id": "doc_low", "relevance_score": 0.12},
+        {"id": "doc_high", "relevance_score": 0.91},
+        {"id": "doc_mid", "relevance_score": 0.55},
+    ]
+    result = fn("query", documents, top_k=2)
+    assert [d["id"] for d in result] == ["doc_high", "doc_mid"]
+
+def test_empty_input_returns_empty_list():
+    fn = get_fn()
+    result = fn("query", [], top_k=3)
+    assert result == []
+`,
+    task_5: `
+def test_faithfulness_ratio_for_supported_answer():
+    fn = get_fn()
+    context = ["The sky is blue.", "Water boils at 100 degrees Celsius."]
+    answer = "The sky is blue and water boils at 100 degrees."
+    result = fn(context, answer)
+    assert result["statements_checked"] == 1
+    assert result["supported_statements"] == 1
+    assert result["faithfulness_ratio"] == 1.0
+`,
+};
+</file>
+
+<file path="src/data/taskFunctionSignatures.ts">
+export interface TaskFunctionSignature {
+    functionName: string;
+    signature: string; // for the starter stub comment/def line
+}
+
+export const TASK_FUNCTION_SIGNATURES: Record<string, TaskFunctionSignature> = {
+    task_1: { functionName: 'syntax_aware_splitter', signature: 'def syntax_aware_splitter(source_code: str):' },
+    task_2: { functionName: 'hybrid_score_fusion', signature: 'def hybrid_score_fusion(sparse_scores, dense_scores, alpha=0.5):' },
+    task_3: { functionName: 'apply_metadata_filter', signature: 'def apply_metadata_filter(documents, conditions):' },
+    task_4: { functionName: 'rerank_retrievals', signature: 'def rerank_retrievals(query, raw_documents, top_k=3):' },
+    task_5: { functionName: 'compute_faithfulness_score', signature: 'def compute_faithfulness_score(context_chunks, generated_answer):' },
+};
+</file>
+
+<file path="src/preview/localPreview.ts">
+import * as os from 'os';
+import * as path from 'path';
+import * as fs from 'fs';
+import { spawn } from 'child_process';
+import { TASK_FUNCTION_SIGNATURES } from '../data/taskFunctionSignatures';
+import { PREVIEW_TEST_BODIES } from '../data/previewTestCases';
+
+export interface TestResult {
+    name: string;
+    status: 'PASSED' | 'FAILED' | 'ERROR';
+}
+
+export interface PreviewRunResult {
+    test_passed: boolean;
+    ai_score: number;
+    ai_feedback: string;
+    exec_error?: string | null;
+    error?: string | null;
+    logs?: string[];
+    testResults?: TestResult[];
+}
+
+function buildPreviewTestFileContent(taskId: string, candidateFilePath: string): string {
+    const sig = TASK_FUNCTION_SIGNATURES[taskId];
+    const functionName = sig?.functionName || 'solution';
+    const testBody = PREVIEW_TEST_BODIES[taskId] || '';
+
+    // Normalize the path for Python
+    const normalizedPath = candidateFilePath.replace(/\\/g, '\\\\');
+
+    const header = `
+import importlib.util
+import sys
+
+def get_fn():
+    spec = importlib.util.spec_from_file_location("candidate_solution", r"${normalizedPath}")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load candidate file: {e}")
+    
+    if not hasattr(module, '${functionName}'):
+        raise AttributeError(f"Your file must define a function named '${functionName}'.")
+    
+    return getattr(module, '${functionName}')
+
+`;
+
+    return header + testBody;
+}
+
+function parseTestOutput(output: string): TestResult[] {
+    const results: TestResult[] = [];
+    const lines = output.split(/\r?\n/);
+
+    // Match pytest -v output lines like: test_name PASSED [ 50%]
+    const testLineRegex = /^(\S+)\s+(PASSED|FAILED|ERROR)\b/;
+
+    for (const line of lines) {
+        const match = line.match(testLineRegex);
+        if (match) {
+            const [, testName, status] = match;
+            results.push({
+                name: testName.split('::').pop() || testName,
+                status: status as 'PASSED' | 'FAILED' | 'ERROR',
+            });
+        }
+    }
+
+    return results;
+}
+
+function buildSummaryFromTests(testResults: TestResult[]): { passed: number; failed: number; total: number } {
+    const passed = testResults.filter((t) => t.status === 'PASSED').length;
+    const failed = testResults.filter((t) => t.status !== 'PASSED').length;
+    return { passed, failed, total: testResults.length };
+}
+
+export async function runLocalPreview(
+    taskId: string,
+    candidateFilePath: string,
+    timeoutMs: number = 10000
+): Promise<PreviewRunResult> {
+    const testFileContent = buildPreviewTestFileContent(taskId, candidateFilePath);
+    const tempDir = os.tmpdir();
+    const tempTestFilePath = path.join(tempDir, `forge-preview-${taskId}-${Date.now()}.py`);
+
+    try {
+        // Write the generated test file
+        fs.writeFileSync(tempTestFilePath, testFileContent, 'utf-8');
+
+        // Spawn pytest
+        const child = spawn('python', ['-m', 'pytest', tempTestFilePath, '-v'], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        let output = '';
+        let hasTimeout = false;
+
+        child.stdout.on('data', (chunk) => {
+            output += chunk.toString();
+        });
+
+        child.stderr.on('data', (chunk) => {
+            output += chunk.toString();
+        });
+
+        const timeoutHandle = setTimeout(() => {
+            hasTimeout = true;
+            if (!child.killed) {
+                child.kill('SIGTERM');
+            }
+        }, timeoutMs);
+
+        await new Promise<void>((resolve) => {
+            child.on('close', () => {
+                clearTimeout(timeoutHandle);
+                resolve();
+            });
+            child.on('error', (err) => {
+                clearTimeout(timeoutHandle);
+                output += `\nPreview run failed to start: ${err.message}`;
+                resolve();
+            });
+        });
+
+        if (hasTimeout) {
+            output += '\nPreview run timed out — check for an infinite loop.';
+        }
+
+        // Parse test results
+        const testResults = parseTestOutput(output);
+        const summary = buildSummaryFromTests(testResults);
+
+        if (testResults.length === 0) {
+            // Fallback: no tests collected, show raw output
+            return {
+                test_passed: false,
+                ai_score: 0,
+                ai_feedback: output.trim() || 'No test output available.',
+                exec_error: 'No tests collected. Check that your file defines the correct function.',
+                error: null,
+                logs: output.split(/\r?\n/),
+                testResults: [],
+            };
+        }
+
+        const test_passed = summary.failed === 0;
+        const ai_score = Math.round((summary.passed / summary.total) * 100);
+
+        return {
+            test_passed,
+            ai_score,
+            ai_feedback: `${summary.passed}/${summary.total} tests passed`,
+            exec_error: test_passed ? null : `${summary.failed} test(s) failed`,
+            error: null,
+            logs: output.split(/\r?\n/),
+            testResults,
+        };
+    } catch (error: any) {
+        return {
+            test_passed: false,
+            ai_score: 0,
+            ai_feedback: error?.message || 'Preview run failed.',
+            exec_error: error?.message || 'Preview run failed.',
+            error: null,
+            logs: [error?.message || 'Preview run failed.'],
+            testResults: [],
+        };
+    } finally {
+        // Clean up the temporary test file
+        if (fs.existsSync(tempTestFilePath)) {
+            try {
+                fs.unlinkSync(tempTestFilePath);
+            } catch {
+                // Ignore cleanup errors
+            }
+        }
+    }
+}
+</file>
+
+<file path="test_workspace/task_1_wrong_function_name.py">
+# Wrong solution - using old function name
+def solution():
+    """This will fail because it's not named syntax_aware_splitter"""
+    return []
+</file>
 
 <file path=".gitignore">
 out
@@ -232,6 +525,433 @@ interface TelemetryData {
 
 - `package.json`'s `activationEvents` currently includes `"*"` alongside specific events like `"onView:forge-vs.ticketView"`. The `"*"` activates the extension on every VS Code startup regardless of use, which is discouraged practice and unnecessary given the specific events already listed. If touching this file for Part 1/3 additions anyway, it is safe to remove `"*"` — but do not do this as a standalone change without also verifying the extension still activates correctly via its specific events afterward.
 - `extension.ts` reads `process.env.FORGE_API_URL` as a fallback before the VS Code configuration setting — `process.env` in a packaged, shipped extension reflects the environment of whoever built the `.vsix`, not the end user's machine, so this fallback is likely dead/misleading code in production. Flag with a comment if noticed; do not silently remove without confirmation, since it may be intentional for the founder's own local dev testing.
+</file>
+
+<file path="COPILOT_FIX_INSTRUCTIONS.md">
+# COPILOT FIX INSTRUCTIONS — Forge AI VS Code Extension: Bug Fixes + Missing Features
+
+## READ THIS FIRST — RULES THAT STILL APPLY FROM `COPILOT_BUILD_INSTRUCTIONS.md`
+
+This file assumes `COPILOT_BUILD_INSTRUCTIONS.md` (Parts 1–3: starter files, local preview, telemetry
+consent) is already built and working, per the current state of `extension.ts`. The same ground rules
+from that file still apply here, unchanged:
+
+1. **Do not modify `src/data/taskData.ts`.** Not the 5 tasks, not the field names, not the content.
+   Every fix below that needs new per-task data goes in a **new sibling file**, not into `taskData.ts`.
+2. **Do not change the existing `/evaluate` API contract's existing fields.** You may **add** new
+   optional fields to the POST body (as Part 3 of the original doc already did for `telemetry`). Never
+   rename or restructure `code`, `task_id`, `ticket_context`, or the response shape.
+3. **Do not add new npm packages.** Everything below is doable with Node built-ins
+   (`crypto`, `child_process`, `os`, `path`, `fs`) plus the existing VS Code API.
+4. **Match the existing visual style.** Sidebar/panel HTML uses VS Code CSS variables. The two results
+   panels (`showResultsPanel`, `showPreviewResultsPanel`) use the existing hardcoded dark-panel style
+   (`#1e1e1e`, `#4caf50`, `#f44336`, etc.) — extend that pattern, don't invent a third style.
+5. **If anything below is ambiguous, insert `// TODO: VERIFY — <question>` and implement the safest,
+   most conservative version.** Do not guess at product decisions. Several items below are marked
+   **TODO: VERIFY** on purpose — build the safe default next to them, don't skip the fix waiting on
+   an answer.
+
+---
+
+## FIX 1 — Local Preview Says "FAILED" Even When the Real Submission Passes
+
+### Root cause (confirmed by reading the code)
+
+In `runPreviewForFile()`, the extension runs:
+
+```ts
+const args = ['-m', 'pytest', filePath, '-v'];
+```
+
+`filePath` is the **candidate's own solution file** (`task_1_solution.py`), not a test file. That file
+only ever contains the stub from `buildStarterTaskFileContent`:
+
+```ts
+return `# Starter file for ${taskId}\n\n\ndef solution():\n    """Implement the solution for ${taskId}."""\n    pass\n`;
+```
+
+Running `pytest` directly against a file with **zero `test_*` functions** collects 0 tests. Pytest's own
+summary line in that case is `"no tests ran in 0.01s"` — which never matches the regex in
+`parsePytestSummary` (`/\d+\s+(passed|failed|error|skipped|xpassed|xfailed)/i`). Downstream:
+
+```ts
+const passed = /\d+\s+passed/i.test(summary) && !failed;
+```
+
+`passed` can never become `true` this way — there is no code path in which local preview can ever say
+PASSED, regardless of whether the candidate's code is correct. This isn't a flaky bug, it's a fully
+unimplemented feature that was already flagged as an unresolved gap in the original build doc
+(`// TODO: VERIFY — confirm the exact local test file naming/location convention`). That gap was never
+closed, which is why it's still broken.
+
+A second, related bug makes this worse: the starter stub always generates a generic `def solution():`,
+but every task actually requires a **specific, differently-named function** (e.g.
+`syntax_aware_splitter(source_code: str)` for task 1). Even a perfect local test harness would have
+nothing correctly named to import.
+
+### The fix
+
+**1a. Add a function-signature lookup table.** New file `src/data/taskFunctionSignatures.ts`
+(sibling to `taskData.ts`, does not modify it):
+
+```ts
+export interface TaskFunctionSignature {
+    functionName: string;
+    signature: string; // for the starter stub comment/def line
+}
+
+export const TASK_FUNCTION_SIGNATURES: Record<string, TaskFunctionSignature> = {
+    task_1: { functionName: 'syntax_aware_splitter', signature: 'def syntax_aware_splitter(source_code: str):' },
+    task_2: { functionName: 'hybrid_score_fusion',   signature: 'def hybrid_score_fusion(sparse_scores, dense_scores, alpha=0.5):' },
+    task_3: { functionName: 'apply_metadata_filter', signature: 'def apply_metadata_filter(documents, conditions):' },
+    task_4: { functionName: 'rerank_retrievals',     signature: 'def rerank_retrievals(query, raw_documents, top_k=3):' },
+    task_5: { functionName: 'compute_faithfulness_score', signature: 'def compute_faithfulness_score(context_chunks, generated_answer):' },
+};
+```
+
+(These function names/signatures are taken directly from the existing "Your Mission" text already in
+`taskData.ts` — nothing invented.)
+
+**1b. Fix the starter stub** in `extension.ts` to use this table instead of the generic `solution()`:
+
+```ts
+export function buildStarterTaskFileContent(taskId: string): string {
+    const sig = TASK_FUNCTION_SIGNATURES[taskId];
+    const signatureLine = sig ? sig.signature : 'def solution():';
+    return `# Starter file for ${taskId}\n\n\n${signatureLine}\n    """Implement the solution for ${taskId}."""\n    pass\n`;
+}
+```
+
+Update `src/test/extension.test.ts`'s existing regex assumption (`/def .*\(\)\s*:/`) if it stops matching
+signatures that take arguments — adjust the test, don't loosen the stub.
+
+**1c. Add real local test bodies**, derived directly from the examples already written in each task's
+`description` in `taskData.ts` (again, not invented). New file `src/data/previewTestCases.ts`:
+
+```ts
+export const PREVIEW_TEST_BODIES: Record<string, string> = {
+  task_1: `
+def test_splits_by_function_definitions():
+    fn = get_fn()
+    source_code = "\\ndef greet(name):\\n    return f\\"Hello, {name}\\"\\n\\ndef farewell(name):\\n    return f\\"Goodbye, {name}\\"\\n"
+    result = fn(source_code)
+    assert len(result) == 2
+    assert "def greet" in result[0]
+    assert "def farewell" in result[1]
+
+def test_invalid_syntax_returns_empty_list():
+    fn = get_fn()
+    result = fn("def broken(:\\n    this is not valid python")
+    assert result == []
+`,
+  task_2: `
+def test_alpha_blends_sparse_and_dense_scores():
+    fn = get_fn()
+    sparse = {"doc_A": 0.9, "doc_B": 0.3}
+    dense = {"doc_A": 0.2, "doc_B": 0.8}
+    result = dict(fn(sparse, dense, alpha=0.5))
+    assert abs(result["doc_A"] - 0.55) < 1e-6
+    assert abs(result["doc_B"] - 0.55) < 1e-6
+
+def test_alpha_zero_uses_only_sparse_scores():
+    fn = get_fn()
+    sparse = {"doc_A": 0.9, "doc_B": 0.3}
+    dense = {"doc_A": 0.2, "doc_B": 0.8}
+    result = dict(fn(sparse, dense, alpha=0.0))
+    assert abs(result["doc_A"] - 0.9) < 1e-6
+    assert abs(result["doc_B"] - 0.3) < 1e-6
+`,
+  task_3: `
+def test_multiple_conditions_use_and_logic():
+    fn = get_fn()
+    documents = [
+        {"id": "1", "status": "active", "score": 0.95, "created_at": "2024-06-01"},
+        {"id": "2", "status": "active", "score": 0.42, "created_at": "2024-06-01"},
+        {"id": "3", "status": "deprecated", "score": 0.88, "created_at": "2024-06-01"},
+    ]
+    conditions = {"min_score": 0.80, "status": "active"}
+    result = fn(documents, conditions)
+    assert [d["id"] for d in result] == ["1"]
+
+def test_empty_conditions_returns_all_documents():
+    fn = get_fn()
+    documents = [{"id": "1", "status": "active", "score": 0.5, "created_at": "2024-06-01"}]
+    result = fn(documents, {})
+    assert len(result) == 1
+`,
+  task_4: `
+def test_returns_top_k_documents_sorted_by_score():
+    fn = get_fn()
+    documents = [
+        {"id": "doc_low", "relevance_score": 0.12},
+        {"id": "doc_high", "relevance_score": 0.91},
+        {"id": "doc_mid", "relevance_score": 0.55},
+    ]
+    result = fn("query", documents, top_k=2)
+    assert [d["id"] for d in result] == ["doc_high", "doc_mid"]
+
+def test_empty_input_returns_empty_list():
+    fn = get_fn()
+    result = fn("query", [], top_k=3)
+    assert result == []
+`,
+  task_5: `
+def test_faithfulness_ratio_for_supported_answer():
+    fn = get_fn()
+    context = ["The sky is blue.", "Water boils at 100 degrees Celsius."]
+    answer = "The sky is blue and water boils at 100 degrees."
+    result = fn(context, answer)
+    assert result["statements_checked"] == 1
+    assert result["supported_statements"] == 1
+    assert result["faithfulness_ratio"] == 1.0
+`,
+};
+```
+
+**1d. Rewrite the preview-run logic** (new file `src/preview/localPreview.ts` recommended, imported into
+`extension.ts`, to keep `extension.ts` from growing unbounded — matches the existing `providers/`/`data/`
+modular pattern):
+
+- Build the full pytest file content at run time by concatenating:
+  1. A fixed header that dynamically imports the candidate's solution via
+     `importlib.util.spec_from_file_location` (using the candidate's **absolute** file path, injected
+     into the template string) and exposes `get_fn()`, which raises a clear `AttributeError` naming the
+     expected function if it's missing (e.g. *"Your file must define a function named
+     'syntax_aware_splitter'."*) — this turns a wrong-function-name mistake into a readable local error
+     instead of a silent 0-collected-tests failure.
+  2. The `PREVIEW_TEST_BODIES[taskId]` body for the current task.
+- Write this generated content to a file in `os.tmpdir()` (Node's `os.tmpdir()`), named something like
+  `forge-preview-${taskId}.py` — **not** inside the candidate's workspace, so it never gets confused with
+  their real files or accidentally committed.
+- `spawn('python', ['-m', 'pytest', tempTestFilePath, '-v'])` exactly as before (keep the existing 10s
+  timeout / kill-on-timeout logic — that part is already correct and should not change).
+- **Parse per-test results**, not just one summary line. Pytest `-v` output has lines like:
+  `tmp_path::test_alpha_zero_uses_only_sparse_scores PASSED [ 50%]`. Use a line-based regex such as
+  `/^(\S+::\S+)\s+(PASSED|FAILED|ERROR)\b/` against each output line to build a structured list of
+  `{ name: string, status: 'PASSED' | 'FAILED' | 'ERROR' }`.
+- Compute `ai_score` for the preview as `Math.round((passedCount / totalCount) * 100)` instead of the
+  current binary `passed ? 100 : 0` — this is the "more accurate score" fix for the local side.
+- If **zero** tests were parsed (e.g. the candidate's file has a syntax error that crashes collection),
+  fall back to showing the raw output, exactly as `parsePytestSummary` already does — don't fabricate a
+  score.
+
+### Also update `showPreviewResultsPanel`
+
+Replace the single feedback blob with a structured checklist: iterate the parsed per-test list and render
+each as a row (✅/❌ + test name), above the raw pytest output (keep raw output too, collapsed or below,
+for debugging). This directly serves Fix 2 below as well.
+
+---
+
+## FIX 2 — Results Are Too Generic / Not Structured (Both Local and Live)
+
+### Local preview
+Covered by Fix 1's structured per-test checklist + percentage-based score. No further work needed here
+beyond what Fix 1 already produces.
+
+### Live results (`showResultsPanel`)
+
+Two concrete bugs found — both are silently **dropping data the backend already sends**, which is very
+likely why live results feel generic even though the backend already returns more:
+
+- `result.logs` (`string[]`, already in the `EvaluationResult` interface) is **never rendered anywhere**
+  in `showResultsPanel`. Add a new "Execution Logs" section (same visual pattern as the existing
+  `.feedback` block) that renders `result.logs.join('<br>')` when the array is non-empty.
+- `result.error` (separate from `result.exec_error` in the interface) is also **never rendered** — only
+  `exec_error` is checked. Add a second, distinctly labeled section for `result.error` when present, so
+  neither field is silently dropped. If both are ever present, show both, clearly labeled separately
+  (e.g. "Execution Error" vs "System Error") — do not merge them into one string.
+- Pass the current `Task` object into `showResultsPanel(result, task)` and render the task's
+  `acceptanceCriteria` (already available client-side from `taskData.ts`, no backend change needed)
+  alongside the score, so the result has visible context instead of a bare number and a paragraph.
+- Lightly format `ai_feedback`: if it contains lines starting with `- ` or `## `/`### `, convert those to
+  real `<li>`/`<h4>` HTML instead of one `<br>`-joined wall of text. Fall back to the current
+  `<br>`-joined behavior for anything that doesn't match — don't assume the backend always sends
+  markdown.
+
+**Do not attempt to make `ai_score` itself "more accurate" for live results** — that number comes
+entirely from the `/evaluate` backend response and this repo has no visibility into how it's computed.
+Insert a comment: `// BACKEND TODO: ai_score granularity/accuracy is backend-controlled — not fixable from the extension.`
+
+---
+
+## FIX 3 — No Task Selection Dropdown Visible (Always Opens Task 1)
+
+### Root cause
+
+`activate()` calls `showTicketPanel(TASK_1)` on every activation. This full-panel view
+(`showTicketPanel`, opened front-and-center in `ViewColumn.One`) is almost certainly what's actually
+being seen — and **it has no `<select>` dropdown at all.** The dropdown only exists in the *sidebar*
+webview (`TicketViewProvider`), a completely separate piece of UI. The auto-opened panel that greets the
+user on every activation is static and locked to whatever task was passed in.
+
+A second bug in the same area: `forge-vs.showTicketView` calls `showTicketPanel(...)` fresh every time
+it runs, calling `vscode.window.createWebviewPanel` again — repeated invocations create **duplicate
+panels** instead of reusing one.
+
+### The fix
+
+- Refactor `showTicketPanel`'s HTML-building code into a reusable `buildTicketPanelHtml(task, taskId)`
+  function, and add the **same** `<select>` dropdown markup + `onDidReceiveMessage`/`taskSelected`
+  message pattern already used in `TicketViewProvider._getHtmlForWebview` — reuse the identical dropdown
+  HTML/CSS so both surfaces look and behave the same way (ground rule 4).
+- Keep a module-level `let ticketPanel: vscode.WebviewPanel | undefined;` in `extension.ts`. On
+  `forge-vs.showTicketView`: if `ticketPanel` already exists, call `ticketPanel.reveal()` and just update
+  its `webview.html` — only call `createWebviewPanel` if it's undefined or was disposed. Register
+  `ticketPanel.onDidDispose(() => { ticketPanel = undefined; })` so a closed panel doesn't leak state.
+- Add a single shared function in `extension.ts`:
+  ```ts
+  function setCurrentTask(taskId: string) {
+      currentTaskId = taskId;
+      ticketProvider?.updateView(taskId);
+      if (ticketPanel) {
+          ticketPanel.webview.html = buildTicketPanelHtml(TASKS[taskId], taskId);
+      }
+  }
+  ```
+  Call this from **both** the sidebar's `onTaskSelected` callback and the panel's own
+  `onDidReceiveMessage` handler for `taskSelected`, so switching tasks from either surface keeps both in
+  sync (currently, changing the sidebar dropdown does not update the panel, and the panel has no way to
+  change it at all).
+
+---
+
+## FIX 4 — Add a Separate Employer Notes Section
+
+**Scope note:** a repo-wide search found **no existing "student notes" feature anywhere in this
+codebase.** If one already exists, it lives outside this repository — Copilot should build **both** a
+candidate notes section and a separate employer notes section as new features here, since nothing to
+extend currently exists.
+
+### Data model
+
+Two fully independent stores, keyed per task, in `context.workspaceState` (local to the machine, not
+sent to the backend — see TODO below):
+
+- `forgeAI.notes.candidate.<taskId>` → `{ timestamp: number, text: string }[]`
+- `forgeAI.notes.employer.<taskId>` → `{ timestamp: number, text: string }[]`
+
+Use an **append-only list of timestamped entries**, not a single overwritable text blob — this is what
+makes the record "precise": each note is a discrete, timestamped observation rather than a running
+draft that silently overwrites itself.
+
+### UI
+
+In `TicketViewProvider._getHtmlForWebview`, add two new, visually separate sections below "Acceptance
+Criteria":
+
+- **"Your Notes"** — a textarea + "Add Note" button, rendering the candidate's existing entries
+  chronologically underneath.
+- **"Employer Notes"** — same interaction pattern, styled distinctly (e.g. a different accent color via
+  a new CSS class, not the same block reused) so it reads as a structurally separate section, not a
+  variant of the first.
+
+### Message passing
+
+Extend the existing `webviewView.webview.onDidReceiveMessage` handler in `TicketViewProvider` with two
+new message types:
+
+```ts
+if (message.type === 'addCandidateNote') { /* append to forgeAI.notes.candidate.<taskId>, refresh */ }
+if (message.type === 'addEmployerNote')   { /* append to forgeAI.notes.employer.<taskId>, refresh */ }
+```
+
+Each carries `{ taskId, text }`; on receipt, append `{ timestamp: Date.now(), text }` to the relevant
+`workspaceState` array and re-render the webview HTML.
+
+### TODO: VERIFY
+
+Insert this comment at the top of the notes code: `// TODO: VERIFY — employer notes currently save
+locally only (workspaceState). Confirm whether these need to sync to the backend so an employer can read
+them from somewhere other than the candidate's own machine, or whether local-only is sufficient for now.`
+Do not add a backend call for notes without resolving this — there is no notes field in the `/evaluate`
+contract today, and adding one would violate ground rule 2 without an explicit decision.
+
+---
+
+## FIX 5 — No User Tracking Without Login
+
+### Root cause
+
+Nothing in the current telemetry payload or the `/evaluate` POST body identifies **who** is submitting.
+`TelemetryData` tracks behavior (save counts, timing) but never a person or even a stable anonymous
+device ID. From the backend's point of view, every submission is unattributable.
+
+### The fix
+
+**5a. Persistent anonymous ID (ship immediately, no prompts):**
+
+```ts
+function getOrCreateParticipantId(context: vscode.ExtensionContext): string {
+    let id = context.globalState.get<string>('forgeAI.participantId');
+    if (!id) {
+        id = randomUUID(); // from Node's built-in 'crypto' module
+        context.globalState.update('forgeAI.participantId', id);
+    }
+    return id;
+}
+```
+
+Generate this once on activation, reuse across sessions and across all tasks.
+
+**5b. One-time name/email prompt**, so the anonymous ID can be mapped to a real person:
+
+- On first activation (after the telemetry consent prompt, so ordering matches the existing pattern),
+  if `context.globalState.get('forgeAI.candidateIdentity')` is undefined, show
+  `vscode.window.showInputBox({ prompt: 'Enter your name or email so your submissions can be identified', placeHolder: 'name@example.com' })`.
+- Store the raw string entered (or `null` if the candidate dismisses the box — don't force it; re-prompt
+  isn't necessary, just retry silently next activation if still undefined) in
+  `context.globalState.update('forgeAI.candidateIdentity', value)`.
+- Add a command `forge-vs.resetCandidateIdentity` (mirrors `forge-vs.resetTelemetryConsent`) that clears
+  it and re-prompts, for correcting typos.
+
+**5c. Include both fields in the existing `/evaluate` POST body** as new optional, additive fields (same
+pattern as `telemetry`):
+
+```ts
+body: JSON.stringify({
+    code: code,
+    task_id: currentTaskId,
+    ticket_context: '',
+    telemetry: telemetryAllowed ? session : null,
+    participant_id: getOrCreateParticipantId(context),
+    candidate_identity: context.globalState.get('forgeAI.candidateIdentity') ?? null,
+}),
+```
+
+Send `participant_id` and `candidate_identity` **regardless of telemetry consent** — this is submission
+attribution (who sent this code), not behavioral tracking (how they worked), so it isn't gated by the
+same consent flag. Insert: `// BACKEND TODO: /evaluate endpoint must accept and store 'participant_id' and 'candidate_identity' — not yet implemented server-side.` — same convention as the existing telemetry TODO.
+
+---
+
+## TESTING CHECKLIST — self-verify before considering this done
+
+- [ ] Preview run against a deliberately wrong solution shows FAILED with a correct per-test breakdown.
+- [ ] Preview run against a correct solution (matching the task's own example) shows PASSED for every
+      sub-test, and the score is 100.
+- [ ] Preview run score reflects `passed/total`, not a flat 0 or 100, when some sub-tests pass and others
+      don't.
+- [ ] A candidate file with the wrong function name shows a clear "must define a function named X" error
+      locally instead of a silent 0-tests-collected failure.
+- [ ] Live results panel renders `logs` and `error` when a mocked backend response includes them.
+- [ ] Both the sidebar dropdown and the auto-opened ticket panel change `currentTaskId` and immediately
+      reflect each other's selection.
+- [ ] Running "Forge AI: Show Ticket View" twice does not create a second panel.
+- [ ] Candidate notes and employer notes persist independently across a reload and are scoped per task.
+- [ ] A fresh install generates one stable `participantId` that survives a VS Code restart.
+- [ ] `taskData.ts` is byte-for-byte unchanged.
+- [ ] No new npm dependencies were added without a `// NEEDS APPROVAL` comment.
+
+---
+
+## OPEN QUESTIONS FOR YOU (collected TODO: VERIFY items)
+
+1. Should employer notes sync to a backend eventually, or is local-only (current machine) fine for now?
+2. Should the candidate identity prompt be required (block until answered) or optional/skippable as
+   written above?
+3. Confirm the backend team is aware of two new required changes: accepting/storing `telemetry`
+   (already flagged previously) and now also `participant_id` + `candidate_identity`.
 </file>
 
 <file path="esbuild.js">
@@ -1037,661 +1757,10 @@ suite('Extension Test Suite', () => {
 	test('starter file content includes the ticket id and a minimal stub', () => {
 		const fileContent = buildStarterTaskFileContent('task_3');
 		assert.match(fileContent, /task_3/);
-		assert.match(fileContent, /def .*\(\)\s*:/);
+		assert.match(fileContent, /def apply_metadata_filter/);
 		assert.match(fileContent, /pass/);
 	});
 });
-</file>
-
-<file path="src/extension.ts">
-import * as fs from 'fs';
-import * as path from 'path';
-import { spawn } from 'child_process';
-import * as vscode from 'vscode';
-import { Task, TASKS, TASK_1 } from './data/taskData';
-import { TicketViewProvider } from './providers/TicketViewProvider';
-
-interface EvaluationResult {
-    test_passed: boolean;
-    ai_score: number;
-    ai_feedback: string;
-    exec_error?: string | null;
-    error?: string | null;
-    logs?: string[];
-}
-
-interface TelemetryData {
-    preview_run_count: number;
-    time_to_first_submit_seconds: number | null;
-    total_save_count: number;
-    session_start_timestamp: number;
-}
-
-let currentTaskId: string = 'task_1';
-let ticketProvider: TicketViewProvider | undefined;
-let previewRunInProgress = false;
-const telemetrySessions: Record<string, TelemetryData> = {};
-
-export function getTaskSolutionFileName(taskId: string): string {
-    return `${taskId}_solution.py`;
-}
-
-export function buildStarterTaskFileContent(taskId: string): string {
-    return `# Starter file for ${taskId}\n\n\ndef solution():\n    """Implement the solution for ${taskId}."""\n    pass\n`;
-}
-
-function getTelemetryConsent(context: vscode.ExtensionContext): boolean {
-    return context.globalState.get<boolean>('forgeAI.telemetryConsent') === true;
-}
-
-function getOrCreateTelemetrySession(taskId: string): TelemetryData {
-    if (!telemetrySessions[taskId]) {
-        telemetrySessions[taskId] = {
-            preview_run_count: 0,
-            time_to_first_submit_seconds: null,
-            total_save_count: 0,
-            session_start_timestamp: Date.now(),
-        };
-    }
-
-    return telemetrySessions[taskId];
-}
-
-function resetTelemetrySession(taskId: string): void {
-    telemetrySessions[taskId] = {
-        preview_run_count: 0,
-        time_to_first_submit_seconds: null,
-        total_save_count: 0,
-        session_start_timestamp: Date.now(),
-    };
-}
-
-async function promptForTelemetryConsent(context: vscode.ExtensionContext): Promise<boolean> {
-    const consentState = context.globalState.get<boolean>('forgeAI.telemetryConsent');
-    if (consentState !== undefined) {
-        return consentState === true;
-    }
-
-    const choice = await vscode.window.showInformationMessage(
-        'Forge AI can track how you work on this ticket — how many times you run a local preview, how long you take, how many times you save — to help build a more complete picture of real engineering work, not just your final answer. This is separate from your code, which is only sent when you Submit. Do you consent to this tracking?',
-        'Yes, I consent',
-        "No, don't track"
-    );
-
-    const consent = choice === 'Yes, I consent';
-    await context.globalState.update('forgeAI.telemetryConsent', consent);
-    return consent;
-}
-
-function trackSaveTelemetry(context: vscode.ExtensionContext): void {
-    if (getTelemetryConsent(context) !== true) {
-        return;
-    }
-
-    const session = getOrCreateTelemetrySession(currentTaskId);
-    session.total_save_count += 1;
-}
-
-function trackPreviewTelemetry(context: vscode.ExtensionContext): void {
-    if (getTelemetryConsent(context) !== true) {
-        return;
-    }
-
-    const session = getOrCreateTelemetrySession(currentTaskId);
-    session.preview_run_count += 1;
-}
-
-function updateFirstSubmitTime(context: vscode.ExtensionContext): TelemetryData | null {
-    if (getTelemetryConsent(context) !== true) {
-        return null;
-    }
-
-    const session = getOrCreateTelemetrySession(currentTaskId);
-    if (session.time_to_first_submit_seconds === null) {
-        session.time_to_first_submit_seconds = Number(((Date.now() - session.session_start_timestamp) / 1000).toFixed(2));
-    }
-
-    return session;
-}
-
-function hasSolutionFilePattern(fileName: string): boolean {
-    return /_solution\.py$/i.test(fileName);
-}
-
-function parsePytestSummary(output: string): string {
-    const lines = output.split(/\r?\n/);
-    const summaryLine = [...lines].reverse().find((line) => /\d+\s+(passed|failed|error|skipped|xpassed|xfailed)/i.test(line));
-    if (summaryLine) {
-        return summaryLine.trim();
-    }
-
-    return output.trim() || 'Preview run finished with no summary output.';
-}
-
-async function runPreviewForFile(context: vscode.ExtensionContext, filePath: string): Promise<void> {
-    if (!filePath) {
-        vscode.window.showErrorMessage('No Python file available for preview.');
-        return;
-    }
-
-    if (previewRunInProgress) {
-        return;
-    }
-
-    previewRunInProgress = true;
-
-    try {
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-        const command = 'python';
-        const args = ['-m', 'pytest', filePath, '-v'];
-
-        // TODO: VERIFY — confirm the exact local test file naming/location convention with the founder before this can run correctly; DO NOT invent a fake path.
-
-        const child = spawn(command, args, {
-            cwd: workspaceFolder?.uri.fsPath,
-            stdio: ['ignore', 'pipe', 'pipe'],
-        });
-
-        let output = '';
-        const timeoutMs = 10000;
-
-        child.stdout.on('data', (chunk) => {
-            output += chunk.toString();
-        });
-
-        child.stderr.on('data', (chunk) => {
-            output += chunk.toString();
-        });
-
-        const timeoutHandle = setTimeout(() => {
-            if (!child.killed) {
-                child.kill('SIGTERM');
-            }
-            output += '\nPreview run timed out — check for an infinite loop.';
-        }, timeoutMs);
-
-        await new Promise<void>((resolve) => {
-            child.on('close', () => {
-                clearTimeout(timeoutHandle);
-                resolve();
-            });
-            child.on('error', () => {
-                clearTimeout(timeoutHandle);
-                output += '\nPreview run failed to start. Ensure Python is installed and available on PATH.';
-                resolve();
-            });
-        });
-
-        const summary = parsePytestSummary(output);
-        const failed = /\d+\s+failed/i.test(summary) || /FAILURES|ERRORS/i.test(output) || /Preview run timed out/i.test(output);
-        const passed = /\d+\s+passed/i.test(summary) && !failed;
-        const feedback = output.trim() || summary;
-
-        showPreviewResultsPanel({
-            test_passed: passed,
-            ai_score: passed ? 100 : 0,
-            ai_feedback: feedback,
-            exec_error: failed ? summary : null,
-            error: failed ? summary : null,
-            logs: output.split(/\r?\n/),
-        });
-
-        trackPreviewTelemetry(context);
-    } catch (error: any) {
-        showPreviewResultsPanel({
-            test_passed: false,
-            ai_score: 0,
-            ai_feedback: error?.message || 'Preview run failed.',
-            exec_error: error?.message || 'Preview run failed.',
-            error: error?.message || 'Preview run failed.',
-            logs: [error?.message || 'Preview run failed.'],
-        });
-        trackPreviewTelemetry(context);
-    } finally {
-        previewRunInProgress = false;
-    }
-}
-
-function showPreviewResultsPanel(result: EvaluationResult) {
-    const panel = vscode.window.createWebviewPanel(
-        'forgePreviewResults',
-        'Local Preview Results',
-        vscode.ViewColumn.Beside,
-        { enableScripts: true }
-    );
-
-    const passed = result.test_passed ? 'passed' : 'failed';
-    const feedback = (result.ai_feedback || 'No local preview output').replace(/\n/g, '<br>');
-    panel.webview.html = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                body {
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                    padding: 24px;
-                    background: #1e1e1e;
-                    color: #cccccc;
-                    line-height: 1.6;
-                }
-                .preview-header {
-                    text-align: center;
-                    font-size: 18px;
-                    font-weight: 700;
-                    letter-spacing: 0.08em;
-                    color: #f4c542;
-                    margin-bottom: 12px;
-                    text-transform: uppercase;
-                }
-                .score {
-                    font-size: 64px;
-                    font-weight: 700;
-                    text-align: center;
-                    padding: 20px 0 10px 0;
-                }
-                .passed { color: #4caf50; }
-                .failed { color: #f44336; }
-                .status {
-                    text-align: center;
-                    font-size: 18px;
-                    padding-bottom: 20px;
-                    border-bottom: 1px solid #333;
-                }
-                .section {
-                    margin-top: 20px;
-                }
-                .section-title {
-                    font-size: 14px;
-                    font-weight: 600;
-                    color: #888;
-                    text-transform: uppercase;
-                    letter-spacing: 0.5px;
-                    margin-bottom: 8px;
-                }
-                .feedback {
-                    background: #2d2d2d;
-                    padding: 16px;
-                    border-radius: 6px;
-                    white-space: pre-wrap;
-                    font-size: 14px;
-                }
-                .error {
-                    color: #f44336;
-                    background: #2d1e1e;
-                    padding: 12px;
-                    border-radius: 6px;
-                    margin-top: 12px;
-                    border: 1px solid #f44336;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="preview-header">LOCAL PREVIEW — NOT YOUR OFFICIAL SCORE</div>
-            <div class="score ${passed}">${result.ai_score || 0}/100</div>
-            <div class="status">${result.test_passed ? '✅ PASSED' : '❌ FAILED'}</div>
-
-            <div class="section">
-                <div class="section-title">Pytest Output</div>
-                <div class="feedback">${feedback}</div>
-            </div>
-
-            ${result.exec_error ? `
-                <div class="section">
-                    <div class="section-title">Preview Error</div>
-                    <div class="error">${result.exec_error}</div>
-                </div>
-            ` : ''}
-        </body>
-        </html>
-    `;
-}
-
-function showResultsPanel(result: EvaluationResult) {
-    const panel = vscode.window.createWebviewPanel(
-        'forgeResults',
-        'Forge AI Results',
-        vscode.ViewColumn.Beside,
-        { enableScripts: true }
-    );
-
-    const passed = result.test_passed ? 'passed' : 'failed';
-    const feedback = (result.ai_feedback || 'No feedback').replace(/\n/g, '<br>');
-
-    panel.webview.html = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                body {
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                    padding: 24px;
-                    background: #1e1e1e;
-                    color: #cccccc;
-                    line-height: 1.6;
-                }
-                .score {
-                    font-size: 64px;
-                    font-weight: 700;
-                    text-align: center;
-                    padding: 20px 0 10px 0;
-                }
-                .passed { color: #4caf50; }
-                .failed { color: #f44336; }
-                .status {
-                    text-align: center;
-                    font-size: 18px;
-                    padding-bottom: 20px;
-                    border-bottom: 1px solid #333;
-                }
-                .section {
-                    margin-top: 20px;
-                }
-                .section-title {
-                    font-size: 14px;
-                    font-weight: 600;
-                    color: #888;
-                    text-transform: uppercase;
-                    letter-spacing: 0.5px;
-                    margin-bottom: 8px;
-                }
-                .feedback {
-                    background: #2d2d2d;
-                    padding: 16px;
-                    border-radius: 6px;
-                    white-space: pre-wrap;
-                    font-size: 14px;
-                }
-                .error {
-                    color: #f44336;
-                    background: #2d1e1e;
-                    padding: 12px;
-                    border-radius: 6px;
-                    margin-top: 12px;
-                    border: 1px solid #f44336;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="score ${passed}">${result.ai_score || 0}/100</div>
-            <div class="status">${result.test_passed ? '✅ PASSED' : '❌ FAILED'}</div>
-
-            <div class="section">
-                <div class="section-title">Feedback</div>
-                <div class="feedback">${feedback}</div>
-            </div>
-
-            ${result.exec_error ? `
-                <div class="section">
-                    <div class="section-title">Execution Error</div>
-                    <div class="error">${result.exec_error}</div>
-                </div>
-            ` : ''}
-        </body>
-        </html>
-    `;
-}
-
-function showTicketPanel(task: Task) {
-    const panel = vscode.window.createWebviewPanel(
-        'forgeTicket',
-        'Forge AI Ticket',
-        vscode.ViewColumn.One,
-        { enableScripts: true }
-    );
-
-    const criteriaHtml = task.acceptanceCriteria.map(criterion => `<li>${criterion}</li>`).join('');
-
-    panel.webview.html = `<!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                body {
-                    font-family: var(--vscode-font-family);
-                    color: var(--vscode-foreground);
-                    background-color: var(--vscode-editor-background);
-                    padding: 16px;
-                    line-height: 1.6;
-                }
-                .ticket-id {
-                    color: var(--vscode-textLink-foreground);
-                    font-size: 11px;
-                    text-transform: uppercase;
-                    letter-spacing: 0.4px;
-                    margin-bottom: 8px;
-                }
-                .ticket-title {
-                    font-size: 20px;
-                    font-weight: 700;
-                    margin: 0 0 10px 0;
-                }
-                .ticket-meta {
-                    display: flex;
-                    flex-wrap: wrap;
-                    gap: 8px;
-                    margin-bottom: 14px;
-                    font-size: 12px;
-                }
-                .tag {
-                    padding: 3px 10px;
-                    border-radius: 999px;
-                    background: var(--vscode-badge-background);
-                    color: var(--vscode-badge-foreground);
-                    font-size: 11px;
-                }
-                .section {
-                    margin-top: 18px;
-                }
-                .section h3 {
-                    margin: 0 0 8px 0;
-                    font-size: 13px;
-                    font-weight: 700;
-                }
-                .content, .context-block {
-                    font-size: 13px;
-                    color: var(--vscode-descriptionForeground);
-                    white-space: pre-wrap;
-                }
-                .context-block {
-                    background: var(--vscode-editor-inactiveSelectionBackground);
-                    padding: 12px;
-                    border-radius: 6px;
-                }
-                ul {
-                    padding-left: 18px;
-                    margin: 0;
-                }
-                li {
-                    margin-bottom: 6px;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="ticket-id">${task.id}</div>
-            <div class="ticket-title">${task.title}</div>
-            <div class="ticket-meta">
-                <span class="tag">${task.priority}</span>
-                <span class="tag">${task.skill}</span>
-                <span class="tag">${task.ticketType}</span>
-                <span class="tag">${task.company}</span>
-                <span class="tag">Reported by ${task.reporter}</span>
-            </div>
-            <div class="section">
-                <h3>Context</h3>
-                <div class="context-block">${task.context}</div>
-            </div>
-            <div class="section">
-                <h3>Description</h3>
-                <div class="content">${task.description}</div>
-            </div>
-            <div class="section">
-                <h3>Acceptance Criteria</h3>
-                <ul>${criteriaHtml}</ul>
-            </div>
-        </body>
-        </html>`;
-}
-
-export async function activate(context: vscode.ExtensionContext) {
-    console.log('🚀 Forge AI extension is now active!');
-
-    await promptForTelemetryConsent(context);
-
-    ticketProvider = new TicketViewProvider(context, (taskId: string) => {
-        currentTaskId = taskId;
-        console.log(`📌 Task changed to: ${taskId}`);
-        vscode.window.showInformationMessage(`📋 Switched to ${TASKS[taskId].id}: ${TASKS[taskId].title}`);
-    });
-
-    const registration = vscode.window.registerWebviewViewProvider(
-        'forge-vs.ticketView',
-        ticketProvider,
-        {
-            webviewOptions: {
-                retainContextWhenHidden: true,
-            },
-        }
-    );
-    context.subscriptions.push(registration);
-    console.log('✅ Ticket view provider registered with options');
-
-    showTicketPanel(TASK_1);
-
-    context.subscriptions.push(
-        vscode.commands.registerCommand('forge-vs.showTicketView', () => {
-            showTicketPanel(TASKS[currentTaskId]);
-        })
-    );
-
-    context.subscriptions.push(
-        vscode.commands.registerCommand('forge-vs.startTask', async () => {
-            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-            if (!workspaceFolder) {
-                vscode.window.showErrorMessage('Open a folder first, then start a task.');
-                return;
-            }
-
-            const fileName = getTaskSolutionFileName(currentTaskId);
-            const filePath = path.join(workspaceFolder.uri.fsPath, fileName);
-            const fileUri = vscode.Uri.file(filePath);
-
-            if (!fs.existsSync(filePath)) {
-                await vscode.workspace.fs.writeFile(fileUri, Buffer.from(buildStarterTaskFileContent(currentTaskId)));
-            }
-
-            const document = await vscode.workspace.openTextDocument(filePath);
-            await vscode.window.showTextDocument(document, { preview: false, viewColumn: vscode.ViewColumn.Active });
-
-            resetTelemetrySession(currentTaskId);
-        })
-    );
-
-    context.subscriptions.push(
-        vscode.commands.registerCommand('forge-vs.previewRun', async () => {
-            const editor = vscode.window.activeTextEditor;
-            const filePath = editor?.document.fileName || vscode.window.activeTextEditor?.document.fileName;
-            if (!filePath) {
-                vscode.window.showErrorMessage('No file open. Open a Python file first.');
-                return;
-            }
-
-            await runPreviewForFile(context, filePath);
-        })
-    );
-
-    context.subscriptions.push(
-        vscode.commands.registerCommand('forge-vs.resetTelemetryConsent', async () => {
-            await context.globalState.update('forgeAI.telemetryConsent', undefined);
-            await promptForTelemetryConsent(context);
-        })
-    );
-
-    context.subscriptions.push(
-        vscode.commands.registerCommand('forge-vs.submit', async () => {
-            console.log(`📤 submit command executed for task: ${currentTaskId}`);
-
-            const editor = vscode.window.activeTextEditor;
-            if (!editor) {
-                vscode.window.showErrorMessage('No file open. Open a Python file first.');
-                return;
-            }
-
-            const code = editor.document.getText();
-            const fileName = editor.document.fileName.split('/').pop() || 'unknown.py';
-            const telemetryAllowed = getTelemetryConsent(context);
-            const session = telemetryAllowed ? updateFirstSubmitTime(context) : null;
-
-            await vscode.window.withProgress(
-                {
-                    location: vscode.ProgressLocation.Notification,
-                    title: `Submitting ${fileName} for ${TASKS[currentTaskId]?.id || currentTaskId}...`,
-                    cancellable: false,
-                },
-                async () => {
-                    try {
-                        const config = vscode.workspace.getConfiguration('forgeAI');
-                        const apiUrl = process.env.FORGE_API_URL ||
-                            config.get('apiUrl') as string ||
-                            'https://forge-ai-core.onrender.com';
-                        console.log(`🌐 API URL: ${apiUrl}`);
-
-                        // BACKEND TODO: /evaluate endpoint must accept an optional 'telemetry' field in the request body and store it — not yet implemented server-side as of this extension build.
-                        const response = await fetch(`${apiUrl}/evaluate`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                code: code,
-                                task_id: currentTaskId,
-                                ticket_context: '',
-                                telemetry: telemetryAllowed ? session : null,
-                            }),
-                        });
-
-                        if (!response.ok) {
-                            const errorText = await response.text();
-                            throw new Error(`API Error (${response.status}): ${errorText}`);
-                        }
-
-                        const result = await response.json() as EvaluationResult;
-
-                        const passedText = result.test_passed ? '✅ PASSED' : '❌ FAILED';
-                        vscode.window.showInformationMessage(
-                            `Forge AI: ${passedText} (Score: ${result.ai_score}/100)`
-                        );
-
-                        showResultsPanel(result);
-                    } catch (error: any) {
-                        vscode.window.showErrorMessage(`Failed to submit: ${error.message}`);
-                        console.error('❌ Submit error:', error);
-                    }
-                }
-            );
-        })
-    );
-
-    context.subscriptions.push(
-        vscode.workspace.onDidSaveTextDocument((document) => {
-            if (!hasSolutionFilePattern(document.fileName)) {
-                return;
-            }
-
-            if (previewRunInProgress) {
-                return;
-            }
-
-            if (getTelemetryConsent(context) !== true) {
-                return;
-            }
-
-            const session = getOrCreateTelemetrySession(currentTaskId);
-            session.total_save_count += 1;
-            void runPreviewForFile(context, document.fileName);
-        })
-    );
-}
-
-export function deactivate() {
-    console.log('👋 Forge AI extension deactivated');
-}
 </file>
 
 <file path="package.json">
@@ -1808,6 +1877,777 @@ export function deactivate() {
     "diff": "^8.0.4",
     "serialize-javascript": "^7.0.6"
   }
+}
+</file>
+
+<file path="src/extension.ts">
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import { spawn } from 'child_process';
+import { randomUUID } from 'crypto';
+import * as vscode from 'vscode';
+import { Task, TASKS, TASK_1 } from './data/taskData';
+import { TASK_FUNCTION_SIGNATURES } from './data/taskFunctionSignatures';
+import { TicketViewProvider } from './providers/TicketViewProvider';
+import { runLocalPreview, PreviewRunResult, TestResult } from './preview/localPreview';
+
+interface EvaluationResult {
+    test_passed: boolean;
+    ai_score: number;
+    ai_feedback: string;
+    exec_error?: string | null;
+    error?: string | null;
+    logs?: string[];
+}
+
+interface TelemetryData {
+    preview_run_count: number;
+    time_to_first_submit_seconds: number | null;
+    total_save_count: number;
+    session_start_timestamp: number;
+}
+
+let currentTaskId: string = 'task_1';
+let ticketProvider: TicketViewProvider | undefined;
+let ticketPanel: vscode.WebviewPanel | undefined;
+let previewRunInProgress = false;
+let extensionContext: vscode.ExtensionContext;
+const telemetrySessions: Record<string, TelemetryData> = {};
+
+export function getTaskSolutionFileName(taskId: string): string {
+    return `${taskId}_solution.py`;
+}
+
+export function buildStarterTaskFileContent(taskId: string): string {
+    const sig = TASK_FUNCTION_SIGNATURES[taskId];
+    const signatureLine = sig ? sig.signature : 'def solution():';
+    return `# Starter file for ${taskId}\n\n\n${signatureLine}\n    """Implement the solution for ${taskId}."""\n    pass\n`;
+}
+
+function getTelemetryConsent(context: vscode.ExtensionContext): boolean {
+    return context.globalState.get<boolean>('forgeAI.telemetryConsent') === true;
+}
+
+function getOrCreateTelemetrySession(taskId: string): TelemetryData {
+    if (!telemetrySessions[taskId]) {
+        telemetrySessions[taskId] = {
+            preview_run_count: 0,
+            time_to_first_submit_seconds: null,
+            total_save_count: 0,
+            session_start_timestamp: Date.now(),
+        };
+    }
+
+    return telemetrySessions[taskId];
+}
+
+function resetTelemetrySession(taskId: string): void {
+    telemetrySessions[taskId] = {
+        preview_run_count: 0,
+        time_to_first_submit_seconds: null,
+        total_save_count: 0,
+        session_start_timestamp: Date.now(),
+    };
+}
+
+async function promptForTelemetryConsent(context: vscode.ExtensionContext): Promise<boolean> {
+    const consentState = context.globalState.get<boolean>('forgeAI.telemetryConsent');
+    if (consentState !== undefined) {
+        return consentState === true;
+    }
+
+    const choice = await vscode.window.showInformationMessage(
+        'Forge AI can track how you work on this ticket — how many times you run a local preview, how long you take, how many times you save — to help build a more complete picture of real engineering work, not just your final answer. This is separate from your code, which is only sent when you Submit. Do you consent to this tracking?',
+        'Yes, I consent',
+        "No, don't track"
+    );
+
+    const consent = choice === 'Yes, I consent';
+    await context.globalState.update('forgeAI.telemetryConsent', consent);
+    return consent;
+}
+
+async function promptForCandidateIdentity(context: vscode.ExtensionContext): Promise<string | null> {
+    const identity = context.globalState.get<string>('forgeAI.candidateIdentity');
+    if (identity !== undefined) {
+        return identity;
+    }
+
+    const entered = await vscode.window.showInputBox({
+        prompt: 'Enter your name or email so your submissions can be identified',
+        placeHolder: 'name@example.com',
+    });
+
+    if (entered !== undefined) {
+        await context.globalState.update('forgeAI.candidateIdentity', entered || null);
+        return entered || null;
+    }
+
+    return null;
+}
+
+function getOrCreateParticipantId(context: vscode.ExtensionContext): string {
+    let id = context.globalState.get<string>('forgeAI.participantId');
+    if (!id) {
+        id = randomUUID();
+        context.globalState.update('forgeAI.participantId', id);
+    }
+    return id;
+}
+
+function trackSaveTelemetry(context: vscode.ExtensionContext): void {
+    if (getTelemetryConsent(context) !== true) {
+        return;
+    }
+
+    const session = getOrCreateTelemetrySession(currentTaskId);
+    session.total_save_count += 1;
+}
+
+function trackPreviewTelemetry(context: vscode.ExtensionContext): void {
+    if (getTelemetryConsent(context) !== true) {
+        return;
+    }
+
+    const session = getOrCreateTelemetrySession(currentTaskId);
+    session.preview_run_count += 1;
+}
+
+function updateFirstSubmitTime(context: vscode.ExtensionContext): TelemetryData | null {
+    if (getTelemetryConsent(context) !== true) {
+        return null;
+    }
+
+    const session = getOrCreateTelemetrySession(currentTaskId);
+    if (session.time_to_first_submit_seconds === null) {
+        session.time_to_first_submit_seconds = Number(((Date.now() - session.session_start_timestamp) / 1000).toFixed(2));
+    }
+
+    return session;
+}
+
+function hasSolutionFilePattern(fileName: string): boolean {
+    return /_solution\.py$/i.test(fileName);
+}
+
+function setCurrentTask(taskId: string) {
+    currentTaskId = taskId;
+    ticketProvider?.updateView(taskId);
+    if (ticketPanel && ticketPanel.webview) {
+        ticketPanel.webview.html = buildTicketPanelHtml(TASKS[taskId], taskId);
+    }
+}
+
+function buildTicketPanelHtml(task: Task, taskId: string): string {
+    const criteriaHtml = task.acceptanceCriteria.map(criterion => `<li>${criterion}</li>`).join('');
+    const taskOptions = Object.entries(TASKS).map(([id, t]) => {
+        const selected = id === taskId ? 'selected' : '';
+        return `<option value="${id}" ${selected}>${t.id} - ${t.title.substring(0, 40)}${t.title.length > 40 ? '...' : ''}</option>`;
+    }).join('');
+
+    return `<!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {
+                font-family: var(--vscode-font-family);
+                color: var(--vscode-foreground);
+                background-color: var(--vscode-editor-background);
+                padding: 16px;
+                line-height: 1.6;
+            }
+            .dropdown-container {
+                margin-bottom: 16px;
+            }
+            .dropdown-container select {
+                width: 100%;
+                padding: 6px 8px;
+                background: var(--vscode-dropdown-background);
+                color: var(--vscode-dropdown-foreground);
+                border: 1px solid var(--vscode-dropdown-border);
+                border-radius: 4px;
+                font-size: 12px;
+                font-family: var(--vscode-font-family);
+                cursor: pointer;
+            }
+            .dropdown-container select:focus {
+                outline: 1px solid var(--vscode-focusBorder);
+            }
+            .ticket-id {
+                color: var(--vscode-textLink-foreground);
+                font-size: 11px;
+                text-transform: uppercase;
+                letter-spacing: 0.4px;
+                margin-bottom: 8px;
+            }
+            .ticket-title {
+                font-size: 20px;
+                font-weight: 700;
+                margin: 0 0 10px 0;
+            }
+            .ticket-meta {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                margin-bottom: 14px;
+                font-size: 12px;
+            }
+            .tag {
+                padding: 3px 10px;
+                border-radius: 999px;
+                background: var(--vscode-badge-background);
+                color: var(--vscode-badge-foreground);
+                font-size: 11px;
+            }
+            .section {
+                margin-top: 18px;
+            }
+            .section h3 {
+                margin: 0 0 8px 0;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            .content, .context-block {
+                font-size: 13px;
+                color: var(--vscode-descriptionForeground);
+                white-space: pre-wrap;
+            }
+            .context-block {
+                background: var(--vscode-editor-inactiveSelectionBackground);
+                padding: 12px;
+                border-radius: 6px;
+            }
+            ul {
+                padding-left: 18px;
+                margin: 0;
+            }
+            li {
+                margin-bottom: 6px;
+            }
+            .divider {
+                border: none;
+                border-top: 1px solid var(--vscode-panel-border);
+                margin: 14px 0;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="dropdown-container">
+            <select id="taskSelect">
+                ${taskOptions}
+            </select>
+        </div>
+
+        <div class="ticket-id">${task.id}</div>
+        <div class="ticket-title">${task.title}</div>
+        <div class="ticket-meta">
+            <span class="tag">${task.priority}</span>
+            <span class="tag">${task.skill}</span>
+            <span class="tag">${task.ticketType}</span>
+            <span class="tag">${task.company}</span>
+        </div>
+
+        <hr class="divider" />
+
+        <div class="section">
+            <h3>Context</h3>
+            <div class="context-block">${task.context}</div>
+        </div>
+
+        <div class="section">
+            <h3>Description</h3>
+            <div class="content">${task.description}</div>
+        </div>
+
+        <div class="section">
+            <h3>Acceptance Criteria</h3>
+            <ul>${criteriaHtml}</ul>
+        </div>
+
+        <script>
+            const vscode = acquireVsCodeApi();
+            const select = document.getElementById('taskSelect');
+            select.addEventListener('change', () => {
+                vscode.postMessage({
+                    type: 'taskSelected',
+                    taskId: select.value
+                });
+            });
+        </script>
+    </body>
+    </html>`;
+}
+
+function formatFeedbackHtml(feedback: string): string {
+    let html = feedback;
+
+    // Convert markdown-style bullet points to HTML lists
+    const bulletRegex = /^- (.+)$/gm;
+    html = html.replace(bulletRegex, '<li>$1</li>');
+
+    // Wrap consecutive list items in <ul>
+    const ulRegex = /(<li>.+<\/li>)/s;
+    if (ulRegex.test(html)) {
+        html = html.replace(/(<li>.+<\/li>)/s, (match) => `<ul>${match}</ul>`);
+    }
+
+    // Convert markdown headers to HTML
+    html = html.replace(/^### (.+)$/gm, '<h4 style="margin-top: 10px;">$1</h4>');
+    html = html.replace(/^## (.+)$/gm, '<h3 style="margin-top: 10px;">$1</h3>');
+
+    // Preserve line breaks
+    html = html.replace(/\n/g, '<br>');
+
+    return html;
+}
+
+function showPreviewResultsPanel(result: PreviewRunResult) {
+    const panel = vscode.window.createWebviewPanel(
+        'forgePreviewResults',
+        'Local Preview Results',
+        vscode.ViewColumn.Beside,
+        { enableScripts: true }
+    );
+
+    const passed = result.test_passed ? 'passed' : 'failed';
+    const testChecklistHtml = result.testResults && result.testResults.length > 0
+        ? result.testResults.map((t) => {
+            const icon = t.status === 'PASSED' ? '✅' : '❌';
+            return `<div style="padding: 6px 0; font-size: 13px;">${icon} ${t.name}</div>`;
+        }).join('')
+        : '';
+    const rawOutput = (result.logs || []).join('<br>');
+
+    panel.webview.html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    padding: 24px;
+                    background: #1e1e1e;
+                    color: #cccccc;
+                    line-height: 1.6;
+                }
+                .preview-header {
+                    text-align: center;
+                    font-size: 18px;
+                    font-weight: 700;
+                    letter-spacing: 0.08em;
+                    color: #f4c542;
+                    margin-bottom: 12px;
+                    text-transform: uppercase;
+                }
+                .score {
+                    font-size: 64px;
+                    font-weight: 700;
+                    text-align: center;
+                    padding: 20px 0 10px 0;
+                }
+                .passed { color: #4caf50; }
+                .failed { color: #f44336; }
+                .status {
+                    text-align: center;
+                    font-size: 18px;
+                    padding-bottom: 20px;
+                    border-bottom: 1px solid #333;
+                }
+                .section {
+                    margin-top: 20px;
+                }
+                .section-title {
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: #888;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                    margin-bottom: 8px;
+                }
+                .test-checklist {
+                    background: #2d2d2d;
+                    padding: 12px;
+                    border-radius: 6px;
+                    margin-bottom: 12px;
+                }
+                .feedback {
+                    background: #2d2d2d;
+                    padding: 16px;
+                    border-radius: 6px;
+                    white-space: pre-wrap;
+                    font-size: 14px;
+                }
+                .error {
+                    color: #f44336;
+                    background: #2d1e1e;
+                    padding: 12px;
+                    border-radius: 6px;
+                    margin-top: 12px;
+                    border: 1px solid #f44336;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="preview-header">LOCAL PREVIEW — NOT YOUR OFFICIAL SCORE</div>
+            <div class="score ${passed}">${result.ai_score || 0}/100</div>
+            <div class="status">${result.test_passed ? '✅ PASSED' : '❌ FAILED'}</div>
+
+            ${testChecklistHtml ? `
+                <div class="section">
+                    <div class="section-title">Test Results</div>
+                    <div class="test-checklist">${testChecklistHtml}</div>
+                </div>
+            ` : ''}
+
+            <div class="section">
+                <div class="section-title">Pytest Output</div>
+                <div class="feedback">${rawOutput || result.ai_feedback || 'No output'}</div>
+            </div>
+
+            ${result.exec_error ? `
+                <div class="section">
+                    <div class="section-title">Preview Error</div>
+                    <div class="error">${result.exec_error}</div>
+                </div>
+            ` : ''}
+        </body>
+        </html>
+    `;
+}
+
+function showResultsPanel(result: EvaluationResult, task: Task) {
+    const panel = vscode.window.createWebviewPanel(
+        'forgeResults',
+        'Forge AI Results',
+        vscode.ViewColumn.Beside,
+        { enableScripts: true }
+    );
+
+    const passed = result.test_passed ? 'passed' : 'failed';
+    const criteriaHtml = task.acceptanceCriteria.map(criterion => `<li>${criterion}</li>`).join('');
+    const formattedFeedback = formatFeedbackHtml(result.ai_feedback || 'No feedback');
+
+    // BACKEND TODO: ai_score granularity/accuracy is backend-controlled — not fixable from the extension.
+    panel.webview.html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    padding: 24px;
+                    background: #1e1e1e;
+                    color: #cccccc;
+                    line-height: 1.6;
+                }
+                .score {
+                    font-size: 64px;
+                    font-weight: 700;
+                    text-align: center;
+                    padding: 20px 0 10px 0;
+                }
+                .passed { color: #4caf50; }
+                .failed { color: #f44336; }
+                .status {
+                    text-align: center;
+                    font-size: 18px;
+                    padding-bottom: 20px;
+                    border-bottom: 1px solid #333;
+                }
+                .section {
+                    margin-top: 20px;
+                }
+                .section-title {
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: #888;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                    margin-bottom: 8px;
+                }
+                .feedback, .content {
+                    background: #2d2d2d;
+                    padding: 16px;
+                    border-radius: 6px;
+                    white-space: pre-wrap;
+                    font-size: 14px;
+                }
+                .error {
+                    color: #f44336;
+                    background: #2d1e1e;
+                    padding: 12px;
+                    border-radius: 6px;
+                    margin-top: 12px;
+                    border: 1px solid #f44336;
+                }
+                ul {
+                    padding-left: 20px;
+                    margin: 0;
+                }
+                li {
+                    margin-bottom: 6px;
+                }
+                h4 {
+                    margin: 12px 0 6px 0;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="score ${passed}">${result.ai_score || 0}/100</div>
+            <div class="status">${result.test_passed ? '✅ PASSED' : '❌ FAILED'}</div>
+
+            <div class="section">
+                <div class="section-title">Acceptance Criteria</div>
+                <ul>${criteriaHtml}</ul>
+            </div>
+
+            <div class="section">
+                <div class="section-title">Feedback</div>
+                <div class="feedback">${formattedFeedback}</div>
+            </div>
+
+            ${result.logs && result.logs.length > 0 ? `
+                <div class="section">
+                    <div class="section-title">Execution Logs</div>
+                    <div class="content">${result.logs.join('<br>')}</div>
+                </div>
+            ` : ''}
+
+            ${result.exec_error ? `
+                <div class="section">
+                    <div class="section-title">Execution Error</div>
+                    <div class="error">${result.exec_error}</div>
+                </div>
+            ` : ''}
+
+            ${result.error ? `
+                <div class="section">
+                    <div class="section-title">System Error</div>
+                    <div class="error">${result.error}</div>
+                </div>
+            ` : ''}
+        </body>
+        </html>
+    `;
+}
+
+async function showOrUpdateTicketPanel() {
+    const task = TASKS[currentTaskId];
+
+    if (ticketPanel && !ticketPanel.active) {
+        ticketPanel.webview.html = buildTicketPanelHtml(task, currentTaskId);
+        ticketPanel.reveal();
+    } else if (!ticketPanel) {
+        ticketPanel = vscode.window.createWebviewPanel(
+            'forgeTicket',
+            'Forge AI Ticket',
+            vscode.ViewColumn.One,
+            { enableScripts: true }
+        );
+        ticketPanel.webview.html = buildTicketPanelHtml(task, currentTaskId);
+        ticketPanel.onDidDispose(() => {
+            ticketPanel = undefined;
+        });
+        ticketPanel.webview.onDidReceiveMessage((message) => {
+            if (message.type === 'taskSelected') {
+                setCurrentTask(message.taskId);
+                void showOrUpdateTicketPanel();
+            }
+        });
+    }
+}
+
+export async function activate(context: vscode.ExtensionContext) {
+    extensionContext = context;
+    console.log('🚀 Forge AI extension is now active!');
+
+    await promptForTelemetryConsent(context);
+    await promptForCandidateIdentity(context);
+    getOrCreateParticipantId(context);
+
+    ticketProvider = new TicketViewProvider(context, (taskId: string) => {
+        setCurrentTask(taskId);
+    });
+
+    const registration = vscode.window.registerWebviewViewProvider(
+        'forge-vs.ticketView',
+        ticketProvider,
+        {
+            webviewOptions: {
+                retainContextWhenHidden: true,
+            },
+        }
+    );
+    context.subscriptions.push(registration);
+    console.log('✅ Ticket view provider registered with options');
+
+    await showOrUpdateTicketPanel();
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.showTicketView', async () => {
+            await showOrUpdateTicketPanel();
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.startTask', async () => {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                vscode.window.showErrorMessage('Open a folder first, then start a task.');
+                return;
+            }
+
+            const fileName = getTaskSolutionFileName(currentTaskId);
+            const filePath = path.join(workspaceFolder.uri.fsPath, fileName);
+            const fileUri = vscode.Uri.file(filePath);
+
+            if (!fs.existsSync(filePath)) {
+                await vscode.workspace.fs.writeFile(fileUri, Buffer.from(buildStarterTaskFileContent(currentTaskId)));
+            }
+
+            const document = await vscode.workspace.openTextDocument(filePath);
+            await vscode.window.showTextDocument(document, { preview: false, viewColumn: vscode.ViewColumn.Active });
+
+            resetTelemetrySession(currentTaskId);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.previewRun', async () => {
+            const editor = vscode.window.activeTextEditor;
+            const filePath = editor?.document.fileName;
+            if (!filePath) {
+                vscode.window.showErrorMessage('No file open. Open a Python file first.');
+                return;
+            }
+
+            if (previewRunInProgress) {
+                vscode.window.showWarningMessage('Preview run already in progress...');
+                return;
+            }
+
+            previewRunInProgress = true;
+
+            try {
+                const result = await runLocalPreview(currentTaskId, filePath, 10000);
+                showPreviewResultsPanel(result);
+                trackPreviewTelemetry(context);
+            } catch (error: any) {
+                vscode.window.showErrorMessage(`Preview run failed: ${error?.message}`);
+            } finally {
+                previewRunInProgress = false;
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.resetTelemetryConsent', async () => {
+            await context.globalState.update('forgeAI.telemetryConsent', undefined);
+            await promptForTelemetryConsent(context);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.resetCandidateIdentity', async () => {
+            await context.globalState.update('forgeAI.candidateIdentity', undefined);
+            await promptForCandidateIdentity(context);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('forge-vs.submit', async () => {
+            console.log(`📤 submit command executed for task: ${currentTaskId}`);
+
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+                vscode.window.showErrorMessage('No file open. Open a Python file first.');
+                return;
+            }
+
+            const code = editor.document.getText();
+            const fileName = editor.document.fileName.split('/').pop() || 'unknown.py';
+            const telemetryAllowed = getTelemetryConsent(context);
+            const session = telemetryAllowed ? updateFirstSubmitTime(context) : null;
+
+            await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: `Submitting ${fileName} for ${TASKS[currentTaskId]?.id || currentTaskId}...`,
+                    cancellable: false,
+                },
+                async () => {
+                    try {
+                        const config = vscode.workspace.getConfiguration('forgeAI');
+                        const apiUrl = process.env.FORGE_API_URL ||
+                            config.get('apiUrl') as string ||
+                            'https://forge-ai-core.onrender.com';
+                        console.log(`🌐 API URL: ${apiUrl}`);
+
+                        // BACKEND TODO: /evaluate endpoint must accept an optional 'telemetry' field in the request body and store it — not yet implemented server-side as of this extension build.
+                        // BACKEND TODO: /evaluate endpoint must accept and store 'participant_id' and 'candidate_identity' — not yet implemented server-side.
+                        const response = await fetch(`${apiUrl}/evaluate`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                code: code,
+                                task_id: currentTaskId,
+                                ticket_context: '',
+                                telemetry: telemetryAllowed ? session : null,
+                                participant_id: getOrCreateParticipantId(context),
+                                candidate_identity: context.globalState.get('forgeAI.candidateIdentity') ?? null,
+                            }),
+                        });
+
+                        if (!response.ok) {
+                            const errorText = await response.text();
+                            throw new Error(`API Error (${response.status}): ${errorText}`);
+                        }
+
+                        const result = await response.json() as EvaluationResult;
+
+                        const passedText = result.test_passed ? '✅ PASSED' : '❌ FAILED';
+                        vscode.window.showInformationMessage(
+                            `Forge AI: ${passedText} (Score: ${result.ai_score}/100)`
+                        );
+
+                        showResultsPanel(result, TASKS[currentTaskId]);
+                    } catch (error: any) {
+                        vscode.window.showErrorMessage(`Failed to submit: ${error.message}`);
+                        console.error('❌ Submit error:', error);
+                    }
+                }
+            );
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.workspace.onDidSaveTextDocument((document) => {
+            if (!hasSolutionFilePattern(document.fileName)) {
+                return;
+            }
+
+            if (previewRunInProgress) {
+                return;
+            }
+
+            trackSaveTelemetry(context);
+
+            if (getTelemetryConsent(context) !== true) {
+                return;
+            }
+
+            void (async () => {
+                const result = await runLocalPreview(currentTaskId, document.fileName, 10000);
+                showPreviewResultsPanel(result);
+                trackPreviewTelemetry(context);
+            })();
+        })
+    );
+}
+
+export function deactivate() {
+    console.log('👋 Forge AI extension deactivated');
 }
 </file>
 

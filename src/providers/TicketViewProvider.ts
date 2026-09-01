@@ -1,11 +1,24 @@
 import * as vscode from 'vscode';
 import { Task, TASKS } from '../data/taskData';
+import { AssignedTicket } from '../api/assignments';
+
+export function escapeHtml(text: string): string {
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
 
 export class TicketViewProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'forge-vs.ticketView';
 
     private _view?: vscode.WebviewView;
+    private _mode: 'demo' | 'assignment' = 'demo';
     private _currentTaskId: string = 'task_1';
+    private _assignedTicket: AssignedTicket | null = null;
+    private _errorMessage: string | null = null;
     private _onTaskSelected?: (taskId: string) => void;
 
     constructor(
@@ -18,7 +31,7 @@ export class TicketViewProvider implements vscode.WebviewViewProvider {
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
-        context: vscode.WebviewViewResolveContext,
+        _context: vscode.WebviewViewResolveContext,
         _token: vscode.CancellationToken,
     ) {
         console.log('📖 resolveWebviewView called!');
@@ -29,24 +42,132 @@ export class TicketViewProvider implements vscode.WebviewViewProvider {
             enableScripts: true,
         };
 
-        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, this._currentTaskId);
+        this._renderCurrentView();
         
-        // Handle messages from the webview (dropdown selection)
+        // Handle messages from the webview (dropdown selection in Demo Mode)
         webviewView.webview.onDidReceiveMessage((message) => {
-            if (message.type === 'taskSelected') {
+            if (message.type === 'taskSelected' && this._mode === 'demo') {
                 this._currentTaskId = message.taskId;
                 if (this._onTaskSelected) {
                     this._onTaskSelected(message.taskId);
                 }
                 // Update the view with the new task
-                if (this._view) {
-                    this._view.webview.html = this._getHtmlForWebview(this._view.webview, message.taskId);
-                }
+                this._renderCurrentView();
             }
         });
     }
 
-    private _getHtmlForWebview(webview: vscode.Webview, taskId: string): string {
+    private _renderCurrentView(): void {
+        if (!this._view) {
+            return;
+        }
+
+        if (this._mode === 'assignment') {
+            if (this._errorMessage) {
+                this._view.webview.html = TicketViewProvider.getHtmlForError(this._errorMessage);
+            } else if (this._assignedTicket) {
+                this._view.webview.html = TicketViewProvider.getHtmlForAssignmentMode(this._assignedTicket);
+            }
+        } else {
+            this._view.webview.html = this._getHtmlForDemoMode(this._view.webview, this._currentTaskId);
+        }
+    }
+
+    public static getHtmlForAssignmentMode(ticket: AssignedTicket): string {
+        const escapedCompanyName = escapeHtml(ticket.company_name);
+        const escapedSignature = escapeHtml(ticket.function_signature);
+
+        return `<!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body {
+                    padding: 16px;
+                    font-family: var(--vscode-font-family);
+                    color: var(--vscode-foreground);
+                    background-color: var(--vscode-editor-background);
+                    line-height: 1.6;
+                }
+                .company-tag {
+                    display: inline-block;
+                    padding: 4px 10px;
+                    border-radius: 4px;
+                    background-color: var(--vscode-badge-background);
+                    color: var(--vscode-badge-foreground);
+                    font-size: 12px;
+                    font-weight: 500;
+                    margin-bottom: 16px;
+                }
+                .instruction {
+                    font-size: 13px;
+                    font-weight: 500;
+                    margin-bottom: 14px;
+                    color: var(--vscode-foreground);
+                }
+                .signature-block {
+                    background-color: var(--vscode-editor-inactiveSelectionBackground);
+                    padding: 12px 14px;
+                    border-radius: 6px;
+                    border-left: 3px solid var(--vscode-textLink-foreground);
+                    font-family: var(--vscode-editor-font-family);
+                    font-size: 12px;
+                    color: var(--vscode-foreground);
+                    white-space: pre-wrap;
+                    word-break: break-all;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="company-tag">You're being assessed by ${escapedCompanyName}</div>
+            <div class="instruction">Implement the function below. Submit when ready.</div>
+            <div class="signature-block"><code>${escapedSignature}</code></div>
+        </body>
+        </html>`;
+    }
+
+    public static getHtmlForError(message: string): string {
+        return `<!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body {
+                    padding: 16px;
+                    font-family: var(--vscode-font-family);
+                    color: var(--vscode-foreground);
+                    background-color: var(--vscode-editor-background);
+                    line-height: 1.6;
+                }
+                .error-box {
+                    background-color: var(--vscode-inputValidation-errorBackground, #5a1d1d);
+                    border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+                    padding: 12px;
+                    border-radius: 4px;
+                    font-size: 13px;
+                    color: var(--vscode-foreground);
+                }
+                .hint {
+                    margin-top: 12px;
+                    font-size: 12px;
+                    color: var(--vscode-descriptionForeground);
+                }
+            </style>
+        </head>
+        <body>
+            <div class="error-box">
+                <strong>Unable to load assignment:</strong><br>${escapeHtml(message)}
+            </div>
+            <div class="hint">
+                To try again or enter a new code, open the Command Palette and run <strong>Forge AI: Enter Assignment Code</strong>.
+            </div>
+        </body>
+        </html>`;
+    }
+
+    private _getHtmlForDemoMode(_webview: vscode.Webview, taskId: string): string {
         const task = TASKS[taskId];
         if (!task) {
             return `<html><body><p>Task not found</p></body></html>`;
@@ -220,9 +341,32 @@ export class TicketViewProvider implements vscode.WebviewViewProvider {
     }
 
     public updateView(taskId: string) {
+        this._mode = 'demo';
         this._currentTaskId = taskId;
-        if (this._view) {
-            this._view.webview.html = this._getHtmlForWebview(this._view.webview, taskId);
-        }
+        this._errorMessage = null;
+        this._renderCurrentView();
+    }
+
+    public setDemoMode(taskId: string = 'task_1') {
+        this._mode = 'demo';
+        this._currentTaskId = taskId;
+        this._assignedTicket = null;
+        this._errorMessage = null;
+        this._renderCurrentView();
+    }
+
+    public setAssignmentMode(ticket: AssignedTicket) {
+        this._mode = 'assignment';
+        this._assignedTicket = ticket;
+        this._currentTaskId = ticket.task_id;
+        this._errorMessage = null;
+        this._renderCurrentView();
+    }
+
+    public setAssignmentError(errorMessage: string) {
+        this._mode = 'assignment';
+        this._assignedTicket = null;
+        this._errorMessage = errorMessage;
+        this._renderCurrentView();
     }
 }

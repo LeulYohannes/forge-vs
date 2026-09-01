@@ -15,11 +15,16 @@
     "onCommand:forge-vs.submit",
     "onCommand:forge-vs.startTask",
     "onCommand:forge-vs.previewRun",
-    "onCommand:forge-vs.resetTelemetryConsent"
+    "onCommand:forge-vs.resetTelemetryConsent",
+    "onCommand:forge-vs.enterAssignmentCode"
   ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
+      {
+        "command": "forge-vs.enterAssignmentCode",
+        "title": "Forge AI: Enter Assignment Code"
+      },
       {
         "command": "forge-vs.submit",
         "title": "Forge AI: Submit for Evaluation"
