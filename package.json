@@ -1,12 +1,20 @@
 {
   "name": "forge-vs",
-  "displayName": "forge-vs",
-  "description": "Forge AI skill verification",
+  "displayName": "Forge AI",
+  "description": "Forge AI skill verification and benchmark engineering assessments",
   "version": "0.0.1",
+  "publisher": "ForgeAI",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LeulYohannes/forge-vs.git"
+  },
+  "license": "MIT",
   "engines": {
     "vscode": "^1.125.0"
   },
   "categories": [
+    "Education",
+    "Testing",
     "Other"
   ],
   "activationEvents": [
